@@ -1,9 +1,10 @@
-name: Build and test
+name: CI and publish
 on:
   push:
+    branches: [master]
   pull_request:
+    branches: [master]
   workflow_dispatch:
-  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -26,6 +27,16 @@ jobs:
         working-directory: mc
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test CI version stamping
+        run: python -B -m unittest discover -s ../.github/scripts -p "test_*.py"
+      - name: Set CI version
+        id: version
+        run: python ../.github/scripts/set_ci_version.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -57,7 +68,7 @@ jobs:
           python3 tests/archive_smoke.py
       - uses: actions/upload-artifact@v4
         with:
-          name: mc-${{ matrix.target }}
+          name: mc-${{ steps.version.outputs.version }}-${{ matrix.target }}
           path: |
             mc/target/${{ matrix.target }}/release/mc
             mc/target/${{ matrix.target }}/release/mc.exe
@@ -66,3 +77,38 @@ jobs:
             PLAN.md
             VFS.md
           if-no-files-found: error
+
+  publish:
+    name: Publish to crates.io
+    needs: native
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: crates-io-publish
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: mc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set CI version
+        run: python ../.github/scripts/set_ci_version.py
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install archive dependencies
+        run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
+      # cargo publish verifies the package before uploading. Only the two version
+      # files are changed in this clean checkout; no version commit is pushed back.
+      - name: Publish verified crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::Add the CARGO_REGISTRY_TOKEN repository secret with permission to publish mc-rs."
+            exit 1
+          fi
+          cargo publish --locked --allow-dirty --registry crates-io

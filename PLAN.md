@@ -299,3 +299,10 @@ Deferred backlog: SFTP, FTP, and SSH-based remote access; archive creation/modif
 - User authorized publishing the project to https://github.com/uxsoft/mc-rs.git. The destination has no existing branch refs.
 - Added the repository URL to Cargo metadata and README. Publishing the existing local `master` history, including VFS, menu, tests, and crates.io workflows.
 - This push does not create a GitHub release or publish a crate. Configure `CARGO_REGISTRY_TOKEN` before releasing `v0.1.0`. Hosted CI results still need verification.
+
+2026-09-08 — consolidated CI and push publishing:
+- Supersedes the release-triggered publishing workflow above. A single `ci.yml` runs the native matrix for master pushes, PRs targeting master, and manual runs. Only a successful master push proceeds to its dependent crates.io publishing job.
+- Removed `publish.yml` and `workflow_call`; no second matrix is dispatched for publishing.
+- CI uses `major.minor.GITHUB_RUN_NUMBER`, stamping the same version in Cargo.toml and the mc-rs lock entry before testing/building/publishing. Binary name remains mc. Version changes stay in runner checkouts; no version commit is pushed back.
+- Uploads use CARGO_REGISTRY_TOKEN and Cargo's built-in package verification. Reruns retain their version and cannot overwrite an already-published version. PR/manual runs never publish.
+- Validation passed: five version-script tests (determinism, dependency preservation, invalid run numbers, mismatched lockfile, license drift), workflow YAML/trigger/dependency assertions, and online cargo publish dry run of a disposable mc-rs@0.1.42 package. No crate was uploaded during local verification.

@@ -103,19 +103,17 @@ See [PLAN.md](PLAN.md) for progress, architecture, acceptance criteria, and the 
 
 ## Publishing to crates.io
 
-`.github/workflows/publish.yml` publishes when a GitHub release is published, including a prerelease. The release tag must be exactly `v` followed by the version in `mc/Cargo.toml` (for example, `v0.2.0`). It runs the existing native CI matrix first, builds and verifies the packaged crate with `cargo publish --dry-run`, then publishes it. Draft releases and ordinary pushes do not publish.
+The single `.github/workflows/ci.yml` workflow builds/tests pushes to `master`, pull requests targeting `master`, and manual runs. Its **Publish to crates.io** job runs only on pushes to `master`, after all four native matrix jobs pass. GitHub releases no longer trigger publishing, and there is no separate publishing workflow or second CI matrix.
 
-Before the first release:
+CI stamps the package version as `major.minor.<github.run_number>`. For example, a checked-in version of `0.1.0` becomes `0.1.42` for workflow run 42. The major/minor values come from `mc/Cargo.toml`; its patch value is replaced. `.github/scripts/set_ci_version.py` updates the manifest and only the matching `mc-rs` lockfile entry in each runner's checkout. Tests, release binaries, artifact names, and the crate upload use the same version. The executable remains `mc`.
 
-1. Use an unpublished version of the `mc-rs` crate in `mc/Cargo.toml` and update `mc/Cargo.lock`. The package explicitly retains the binary name `mc`. Keep `mc/LICENSE` synchronized with the root `LICENSE`; the release guard checks this.
-2. Add a crates.io API token with publishing permission for the chosen crate as the GitHub Actions repository secret `CARGO_REGISTRY_TOKEN`. Create/manage the token in [crates.io account settings](https://crates.io/settings/tokens); do not commit it.
-3. Commit the workflows, package metadata, lockfile, and all source/fixture changes. Create and push a matching version tag, then publish a GitHub release for that tag. The workflow publishes the tagged source after all four native jobs pass.
+Add a crates.io API token with publishing permission for `mc-rs` as the GitHub Actions repository secret `CARGO_REGISTRY_TOKEN`. Create/manage the token in [crates.io account settings](https://crates.io/settings/tokens); do not commit it. Then push the source changes to `master`. Keep `mc/LICENSE` synchronized with the root `LICENSE`; version stamping checks this.
 
-After publication, users can install with `cargo install mc-rs --locked` (with the build dependencies above installed).
+Version changes are temporary CI changes and are not committed or pushed back. Publishing uses `--locked --allow-dirty` for the stamped checkout and Cargo's built-in package verification before upload. The publishing token is exposed only to the upload step. Publishing jobs are serialized; PR and manual runs never receive the token or publish.
 
-The token is exposed only to the final publish step. GitHub permissions are limited to reading repository contents, and publish runs are serialized. A failed job can be rerun from Actions after resolving its cause; already-published crate versions are immutable. See the [Cargo publishing documentation](https://doc.rust-lang.org/cargo/reference/publishing.html).
+GitHub reruns retain the same run number and version. If that version was already uploaded, crates.io rejects a second upload; use a new push for another version. Run numbers may have gaps from PR/manual/failed runs. See [GitHub's run-number documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/variables) and the [Cargo publishing command](https://doc.rust-lang.org/cargo/commands/cargo-publish.html).
 
-Source repository: [uxsoft/mc-rs](https://github.com/uxsoft/mc-rs). Configure the publishing token in that repository before publishing a release.
+After publication, install with `cargo install mc-rs --locked` (with the build dependencies above installed). Source repository: [uxsoft/mc-rs](https://github.com/uxsoft/mc-rs).
 
 ## License and references
 
