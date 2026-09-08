@@ -306,3 +306,8 @@ Deferred backlog: SFTP, FTP, and SSH-based remote access; archive creation/modif
 - CI uses `major.minor.GITHUB_RUN_NUMBER`, stamping the same version in Cargo.toml and the mc-rs lock entry before testing/building/publishing. Binary name remains mc. Version changes stay in runner checkouts; no version commit is pushed back.
 - Uploads use CARGO_REGISTRY_TOKEN and Cargo's built-in package verification. Reruns retain their version and cannot overwrite an already-published version. PR/manual runs never publish.
 - Validation passed: five version-script tests (determinism, dependency preservation, invalid run numbers, mismatched lockfile, license drift), workflow YAML/trigger/dependency assertions, and online cargo publish dry run of a disposable mc-rs@0.1.42 package. No crate was uploaded during local verification.
+
+2026-09-08 — macOS archive lock test correction:
+- Reproduced the reported core-test failure on Linux by setting TMPDIR to a symlinked directory. The test compared a canonical job resource with a raw archive filename, unlike the application's comparison of two prepared lock sets.
+- Updated the test to prepare deletion resources through `jobs::resources`, documented the `overlaps` input contract, and added Unix coverage for archive locks reached through aliased parent directories, ancestor deletion, and unrelated sibling paths.
+- Runtime locking behavior is unchanged. Validation passed: all 31 integration/contract tests with a symlinked TMPDIR, formatting, strict Clippy, and git diff checks. Native macOS rerun remains for GitHub Actions.

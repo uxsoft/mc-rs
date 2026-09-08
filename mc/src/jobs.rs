@@ -287,6 +287,7 @@ pub fn resources(op: Operation, sources: &[VfsPath], destination: &VfsPath) -> V
         .map(|p| VfsPath::new(p.fs.clone(), p.fs.canonical(&p.path).unwrap_or(p.path)))
         .collect()
 }
+/// Compare lock sets returned by `resources`; inputs must already be canonicalized.
 pub fn overlaps(a: &[VfsPath], b: &[VfsPath]) -> bool {
     a.iter()
         .any(|a| b.iter().any(|b| a.starts_with(b) || b.starts_with(a)))

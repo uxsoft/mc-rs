@@ -665,7 +665,10 @@ fn archive_metadata_copy_lifetime_and_read_only_capabilities() {
             .is_some()
         );
     }
-    assert!(jobs::overlaps(&job.resources, &[file.into()]));
+    // Compare prepared lock sets, as App::start does. Temporary directories can
+    // contain symlink aliases (notably /var -> /private/var on macOS).
+    let deletion_resources = jobs::resources(Operation::Delete, &[file.into()], &d.path().into());
+    assert!(jobs::overlaps(&job.resources, &deletion_resources));
 }
 #[test]
 fn password_cancellation_preserves_destination() {
@@ -738,4 +741,29 @@ fn metadata_browsing_does_not_decode_corrupt_payload() {
         bytes.is_empty(),
         "validation must not release corrupt plaintext"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn archive_locks_overlap_through_symlinked_parent_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let real = d.path().join("real");
+    let alias = d.path().join("alias");
+    fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    fs::write(real.join("test.tar"), tar_bytes()).unwrap();
+    fs::write(real.join("unrelated"), b"keep").unwrap();
+    let root = archives::open(alias.join("test.tar").into(), &Context::default(), |_| {}).unwrap();
+    let destination = d.path().join("out").into();
+    let copy = jobs::resources(Operation::Copy, &[root.join("folder")], &destination);
+    for path in [real.join("test.tar"), alias.join("test.tar"), real.clone()] {
+        let deletion = jobs::resources(Operation::Delete, &[path.into()], &destination);
+        assert!(jobs::overlaps(&copy, &deletion));
+    }
+    let unrelated = jobs::resources(
+        Operation::Delete,
+        &[alias.join("unrelated").into()],
+        &destination,
+    );
+    assert!(!jobs::overlaps(&copy, &unrelated));
 }
