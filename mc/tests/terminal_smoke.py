@@ -43,6 +43,22 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
     try:
         pump(.7)
         assert b'alpha.txt' in output
+        send(b'\x1b[20~')  # F9 File dropdown
+        assert b'Create directory' in output
+        send(b'\x1b[C')  # switch to View
+        send(b'\x0c')
+        assert b'Show hidden files' in output
+        send(b'\x1b[F'); send(b'\r')  # Refresh action closes the menu
+        send(b'\x1b[<0;7;1M'); send(b'\x1b[<0;7;1m')  # File title
+        send(b'\x1b[<0;12;7M'); send(b'\x1b[<0;12;7m')  # Background jobs
+        send(b'\x0c')
+        assert b'No jobs yet.' in output
+        send(b'\r')
+        send(b'\x1b[<0;18;1M'); send(b'\x1b[<0;18;1m')  # Go title
+        send(b'\x1b[B'); send(b'\r')  # Find dialog
+        send(b'\x0c')
+        assert b'Find filename' in output
+        send(b'\x1b')  # close dialog
         send(b'\x1b[B')  # select alpha
         send(b'\x1bOR')  # F3 cat
         assert b'cat smoke content' in output

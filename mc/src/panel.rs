@@ -1,7 +1,7 @@
+use crate::vfs::{Context, Kind, VfsPath};
 use anyhow::Result;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -12,7 +12,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Entry {
-    pub path: PathBuf,
+    pub path: VfsPath,
     pub name: String,
     pub directory: bool,
     pub link: bool,
@@ -26,17 +26,13 @@ pub enum Sort {
     Size,
     Modified,
 }
-pub struct Mount {
-    pub temp: tempfile::TempDir,
-    pub source: PathBuf,
-}
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DirectorySize {
     pub bytes: u64,
     pub errors: usize,
 }
 struct SizeScan {
-    path: PathBuf,
+    path: VfsPath,
     cancel: Arc<AtomicBool>,
     receiver: mpsc::Receiver<DirectorySize>,
 }
@@ -46,48 +42,60 @@ impl Drop for SizeScan {
     }
 }
 /// Logical bytes, including hidden files and link lengths, without following symlinks.
-pub fn directory_size(path: &std::path::Path, cancel: &AtomicBool) -> DirectorySize {
+pub fn directory_size(path: &VfsPath, cancel: &AtomicBool) -> DirectorySize {
+    scan_size(path, cancel, &Context::default())
+}
+fn scan_size(path: &VfsPath, cancel: &AtomicBool, ctx: &Context) -> DirectorySize {
     let mut total = DirectorySize::default();
-    for entry in walkdir::WalkDir::new(path)
-        .follow_links(false)
-        .follow_root_links(false)
-    {
+    let mut pending = vec![path.clone()];
+    while let Some(path) = pending.pop() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        match entry {
-            Ok(entry) if !entry.file_type().is_dir() => {
-                match std::fs::symlink_metadata(entry.path()) {
-                    Ok(meta) => total.bytes = total.bytes.saturating_add(meta.len()),
-                    Err(_) => total.errors += 1,
-                }
-            }
-            Ok(_) => {}
+        match path.metadata(false, ctx) {
+            Ok(m) if m.kind == Kind::Directory => match path.read_dir(ctx) {
+                Ok(entries) => pending.extend(entries.into_iter().map(|(p, _)| p)),
+                Err(_) => total.errors += 1,
+            },
+            Ok(m) => total.bytes = total.bytes.saturating_add(m.size),
             Err(_) => total.errors += 1,
         }
     }
     total
 }
+struct Listing {
+    receiver: mpsc::Receiver<Result<Vec<Entry>>>,
+    cancel: Arc<AtomicBool>,
+}
+impl Drop for Listing {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
 pub struct Panel {
-    pub path: PathBuf,
+    context: Context,
+    pub path: VfsPath,
     pub entries: Vec<Entry>,
     pub cursor: usize,
     pub offset: usize,
-    pub selected: HashSet<PathBuf>,
+    pub selected: HashSet<VfsPath>,
     pub hidden: bool,
     pub sort: Sort,
     pub loading: bool,
     pub error: Option<String>,
-    pub mount: Option<Arc<Mount>>,
-    pending: Option<mpsc::Receiver<Result<Vec<Entry>>>>,
-    pub reveal: Option<PathBuf>,
-    pub directory_sizes: HashMap<PathBuf, DirectorySize>,
+    pending: Option<Listing>,
+    pub reveal: Option<VfsPath>,
+    pub directory_sizes: HashMap<VfsPath, DirectorySize>,
     size_scan: Option<SizeScan>,
 }
 impl Panel {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: impl Into<VfsPath>) -> Self {
+        Self::with_context(path, Context::default())
+    }
+    pub fn with_context(path: impl Into<VfsPath>, context: Context) -> Self {
         let mut p = Self {
-            path,
+            context,
+            path: path.into(),
             entries: vec![],
             cursor: 0,
             offset: 0,
@@ -96,7 +104,6 @@ impl Panel {
             sort: Sort::Name,
             loading: false,
             error: None,
-            mount: None,
             pending: None,
             reveal: None,
             directory_sizes: HashMap::new(),
@@ -113,23 +120,31 @@ impl Panel {
         let (tx, rx) = mpsc::channel();
         self.loading = true;
         self.error = None;
-        self.pending = Some(rx);
+        let ctx = Context {
+            cancel: Arc::new(AtomicBool::new(false)),
+            ..self.context.clone()
+        };
+        self.pending = Some(Listing {
+            receiver: rx,
+            cancel: ctx.cancel.clone(),
+        });
         std::thread::spawn(move || {
             let _ = tx.send((|| {
                 let mut entries = vec![];
-                for item in std::fs::read_dir(path)? {
-                    let item = item?;
-                    let path = item.path();
-                    let name = item.file_name().to_string_lossy().into_owned();
+                for (path, m) in path.read_dir(&ctx)? {
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
                     if !hidden && name.starts_with('.') {
                         continue;
                     }
-                    let m = std::fs::symlink_metadata(&path)?;
                     entries.push(Entry {
-                        directory: m.is_dir() || (m.is_symlink() && path.is_dir()),
-                        link: m.is_symlink(),
-                        size: m.len(),
-                        modified: m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        directory: m.kind == Kind::Directory
+                            || (m.kind == Kind::Symlink
+                                && path
+                                    .metadata(true, &ctx)
+                                    .is_ok_and(|m| m.kind == Kind::Directory)),
+                        link: m.kind == Kind::Symlink,
+                        size: m.size,
+                        modified: m.modified,
                         name,
                         path,
                     });
@@ -140,7 +155,10 @@ impl Panel {
     }
     pub fn poll(&mut self) {
         self.poll_sizes();
-        let result = self.pending.as_ref().and_then(|rx| rx.try_recv().ok());
+        let result = self
+            .pending
+            .as_ref()
+            .and_then(|listing| listing.receiver.try_recv().ok());
         if let Some(result) = result {
             self.pending = None;
             self.loading = false;
@@ -200,10 +218,12 @@ impl Panel {
                 let cancel = Arc::new(AtomicBool::new(false));
                 let worker_cancel = cancel.clone();
                 let worker_path = path.clone();
-                let mount = self.mount.clone();
+                let ctx = Context {
+                    cancel: cancel.clone(),
+                    ..self.context.clone()
+                };
                 std::thread::spawn(move || {
-                    let _mount = mount;
-                    let size = directory_size(&worker_path, &worker_cancel);
+                    let size = scan_size(&worker_path, &worker_cancel, &ctx);
                     if !worker_cancel.load(Ordering::Relaxed) {
                         let _ = tx.send(size);
                     }
@@ -252,7 +272,7 @@ impl Panel {
     pub fn current(&self) -> Option<&Entry> {
         self.cursor.checked_sub(1).and_then(|i| self.entries.get(i))
     }
-    pub fn sources(&self) -> Vec<PathBuf> {
+    pub fn sources(&self) -> Vec<VfsPath> {
         if self.selected.is_empty() {
             self.current()
                 .map(|e| vec![e.path.clone()])
@@ -279,7 +299,7 @@ impl Panel {
             self.selected.insert(path);
         }
     }
-    pub fn navigate(&mut self, path: PathBuf) {
+    pub fn navigate(&mut self, path: VfsPath) {
         self.path = path;
         self.cursor = 0;
         self.offset = 0;
@@ -288,30 +308,11 @@ impl Panel {
         self.refresh();
     }
     pub fn parent(&mut self) {
-        if let Some(m) = &self.mount
-            && self.path == m.temp.path()
-        {
-            let source = m.source.clone();
-            self.mount = None;
-            self.navigate(source.parent().unwrap_or(&source).to_owned());
-            return;
-        }
         if let Some(parent) = self.path.parent() {
-            self.navigate(parent.to_owned());
+            self.navigate(parent);
         }
     }
     pub fn label(&self) -> String {
-        if let Some(m) = &self.mount {
-            format!(
-                "{}!{}",
-                m.source.display(),
-                self.path
-                    .strip_prefix(m.temp.path())
-                    .unwrap_or(&self.path)
-                    .display()
-            )
-        } else {
-            self.path.display().to_string()
-        }
+        self.path.display()
     }
 }

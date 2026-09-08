@@ -62,3 +62,29 @@ pub fn launch(path: &Path, edit: bool, terminal: &mut ratatui::DefaultTerminal) 
     resume(terminal)?;
     result
 }
+
+/// Virtual files are streamed into cat's stdin; no plaintext temporary file is created.
+pub fn cat_stream(
+    mut reader: Box<dyn io::Read + Send>,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> Result<()> {
+    suspend();
+    let result = (|| -> Result<()> {
+        let mut child = Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        let mut stdin = child.stdin.take().unwrap();
+        let copied = io::copy(&mut reader, &mut stdin);
+        drop(stdin);
+        let status = child.wait()?;
+        print!("\nPress Enter to return to mc…");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        copied?;
+        anyhow::ensure!(status.success(), "cat exited with {status}");
+        Ok(())
+    })();
+    resume(terminal)?;
+    result
+}

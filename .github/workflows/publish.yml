@@ -1,0 +1,69 @@
+name: Publish to crates.io
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check release version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require a tag matching the crate version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          if Path("LICENSE").read_bytes() != Path("mc/LICENSE").read_bytes():
+              raise SystemExit("Keep mc/LICENSE synchronized with the root LICENSE")
+          package = tomllib.loads(Path("mc/Cargo.toml").read_text())["package"]
+          expected = "v" + package["version"]
+          actual = os.environ["RELEASE_TAG"]
+          if actual != expected:
+              raise SystemExit(f"Release tag {actual!r} must match {expected!r} in mc/Cargo.toml")
+          PY
+
+  checks:
+    name: Native checks
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish verified crate
+    needs: checks
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install archive dependencies
+        run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
+      - name: Verify the packaged crate
+        run: cargo publish --locked --dry-run --registry crates-io
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::Add the CARGO_REGISTRY_TOKEN repository secret with permission to publish this crate."
+            exit 1
+          fi
+          cargo publish --locked --registry crates-io

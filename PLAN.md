@@ -1,7 +1,7 @@
 # mc — implementation plan and session handoff
 
 Last updated: 2026-09-08
-Current phase: First usable implementation complete on Linux x64. M1–M5 functionality implemented; M6 cross-platform native verification and non-Linux release artifacts remain pending.
+Current phase: VFS and lazy/password-protected archive migration complete and verified on Linux x64. M6 native verification outside Linux x64 remains pending.
 
 ## Working agreement
 
@@ -24,7 +24,8 @@ Current phase: First usable implementation complete on Linux x64. M1–M5 functi
 - No MC shell functionality: no command prompt, persistent subshell, Ctrl+O shell switching, or command execution interface. Directly launching the viewer/editor is still in scope.
 - Required archive formats: ZIP, RAR, tar, 7z, and gzip.
 - Filename search only; no content search.
-- SFTP, FTP, and SSH-based remote browsing are deferred.
+- SFTP, FTP, and SSH-based remote browsing are deferred. The user explicitly requires an MC-inspired VFS foundation now, shared by local and archive operations and suitable for those later backends.
+- Archive browsing retains metadata in memory and streams requested content; implement password prompts, retries, cancellation, and session-only credentials.
 - No customization system or importing MC configurations, keymaps, skins, extension rules, or user menus.
 - GPL-3 license is acceptable. Planned project license identifier: GPL-3.0-or-later, matching upstream; retain attribution for adapted material.
 
@@ -41,7 +42,7 @@ Use upstream behavior, documentation, and relevant source as references for keyb
 
 - Archive support initially means browsing and extracting. Archive creation and in-place modifications were not explicitly requested and are deferred. Do not present archive entries as writable files.
 - Gzip is a compressed stream rather than a directory container: support decompression of `.gz` and browsing/extracting compressed tar archives such as `.tar.gz`.
-- Filename search is recursive from the active directory, cancellable, with results that can navigate to the containing directory and select the match. Do not follow directory symlinks recursively by default. Archive-content search is deferred.
+- Filename search is recursive from the active directory, cancellable, with results that can navigate to the containing directory and select the match. Do not follow directory symlinks recursively by default. Search within the current archive VFS uses the same traversal; searching unopened archive contents is deferred.
 - F4 launches an external editor selected from `VISUAL`, then `EDITOR`, then a platform fallback determined during implementation. This conventional environment integration is not an application customization system. Report a missing editor clearly.
 - File viewing suspends the TUI, invokes `cat` directly with the selected path, and leaves its output visible until the user returns to the TUI. Handle terminal restoration on errors and cancellation. No pager or internal viewer.
 - Remote destinations, plugin systems, archive writing, content search, embedded terminals, and a built-in editor are outside the first release.
@@ -60,7 +61,7 @@ Proposed modules:
 | `ui` | Ratatui rendering, layout, theme, dialogs, function-key bar, and mouse hit regions |
 | `input` | Terminal events to semantic actions; fixed MC-compatible bindings |
 | `panel` | Directory location, listing, sorting, selection, cursor, and refresh reconciliation |
-| `fs` | Local filesystem access, metadata, path identity, and platform differences |
+| `vfs` / `vfs::local` | Backend trait, session-aware paths, metadata, read/write handles, cancellation/authentication, local platform operations |
 | `jobs` | Background operation planning, execution, progress, conflicts, and cancellation |
 | `archives` | Format detection, listings, extraction, and backend capability reporting |
 | `search` | Recursive filename search and streamed results |
@@ -100,12 +101,12 @@ Select exact dependency versions during implementation from current official doc
 
 ### Archive access
 
-- Provide a narrow archive interface for listing and extraction, with capability/error reporting per format. Avoid building a generic remote VFS before it is needed.
+- Use `vfs::FileSystem` and `VfsPath` for both local and archive operations. This supersedes the initial narrow archive-only design, as explicitly requested by the user. See `VFS.md` for upstream source references and the backend contract.
 - M1 must establish workable ZIP, RAR, tar, 7z, and gzip backends on all four targets. Prefer maintained libraries when suitable; external helpers are acceptable only with documented availability and actionable missing-helper errors. Only `cat` is currently assumed installed by the user.
 - Enter opens an archive as a browsable location; copying entries to a local panel extracts them through the job engine. Moving/deleting archive entries is unavailable in the initial read-only model.
 - Validate extracted paths, links, and destination traversal to prevent writing outside the chosen destination. Handle malicious absolute paths, `..`, and symlink escapes.
-- Extract entries needed by `cat` or an external editor to owned temporary storage. Initially allow viewing only inside archives; do not imply editor changes will be written back.
-- Surface unsupported encryption, corrupt archives, and unsupported format variants explicitly. Document encrypted/multipart archive support based on backend capability; these are not yet promised.
+- Stream archive members to external `cat` stdin or a staged destination handle. Do not extract a browsing tree or create plaintext viewer temporary files. Archive editing remains unavailable.
+- ZIP AES/ZipCrypto, 7z AES, and RAR password handling use masked prompts and session credentials. Multipart archives remain unsupported; decoder errors and capability limits are explicit.
 
 ### External processes and terminal ownership
 
@@ -168,11 +169,21 @@ Acceptance: search remains responsive; viewer/editor paths containing spaces wor
 - [x] Browse and extract ZIP, RAR, tar, and 7z.
 - [x] Decompress gzip streams and browse/extract `.tar.gz`.
 - [x] Route extraction through background jobs with progress/cancellation where backend permits.
-- [x] View archive files through temporary extraction and `cat`.
+- [x] View archive files through a bounded VFS stream into `cat` stdin (supersedes temporary extraction).
 - [x] Reject unsafe extraction paths and clearly disable unsupported mutations.
 - [x] Document format variants, encrypted/multipart limitations, and any runtime helpers.
 
 Acceptance: representative fixtures for all five formats pass; archive traversal cannot escape the destination; unsupported/corrupt archives produce useful errors.
+
+### M5b — MC-inspired VFS and lazy encrypted archives (implemented; Linux x64 verified)
+
+- [x] Read upstream VFS class/path/inode and tar implementation sources; record references in `VFS.md`.
+- [x] Introduce provider-dispatched metadata, listings, streams, staged writes, mutations, capabilities, and session-aware paths.
+- [x] Migrate panels, directory sizing, filename search, copy/move/delete, resource locks, and viewer dispatch.
+- [x] Replace extracted archive mounts with an immutable entry/child index and lazy decoded streams.
+- [x] Add session password prompts, masking, retry, cancellation, and authenticated content validation.
+- [x] Verify all five formats and encrypted ZIP/7z/RAR; corrupt ZIP detection now uses the ZIP Rust reader because compress-tools treats libarchive data warnings as success.
+- [x] Complete independent VFS provider tests, terminal archive/password interaction checks, strict lint, and release rebuild.
 
 ### M6 — First-release verification and packaging (partially complete)
 
@@ -222,14 +233,37 @@ Layout follow-up:
 - Page navigation and visible-row shortcuts now use the actual panel height.
 - Verified with formatting, strict Clippy, all 22 integration tests, and the PTY smoke test. Rebuilt the Linux x64 release binary and package.
 
+Application menu follow-up:
+- Replaced the centered F9 menu dialog with a persistent File / View / Go / Help bar and anchored dropdowns.
+- Shared menu definitions provide action labels, shortcut hints, and dispatch. View marks the current sort and hidden-file setting.
+- F9 opens File; Left/Right/Tab switch categories, Up/Down/Home/End navigate, Enter activates, Esc/F9 closes. Mouse clicks/hover and outside dismissal are supported. Dropdowns scroll on small terminals.
+- File operations reuse their existing confirmation dialogs; background jobs moved to File → Background jobs.
+- Verified with strict Clippy, all 22 tests (including dropdown bounds/scrolling), and PTY keyboard/mouse menu interactions. Rebuilt the Linux release.
+
+VFS and encrypted archive follow-up:
+- Studied upstream `vfs.h`, `path.h`, `xdirentry.h`, `interface.c`, and `tar.c`. Added `VFS.md` with source links, design mapping, the backend contract, and future SSH/SFTP/FTP integration work.
+- Replaced temporary-directory archive mounts with provider-owned metadata/children indexes. `VfsPath` carries backend identity; local platform operations are isolated in `vfs/local.rs`. Panels, search, directory sizes, jobs, locks, and file reading dispatch through the shared interface.
+- Added bounded member streams, password UI/retry/cancel, session-only credentials, and streamed `cat` stdin. Completed job records release their resource/session references in the UI. No browsing tree or plaintext viewer temporary file is created.
+- Added ZIP AES/ZipCrypto, 7z AES, and RAR password handling with Rust decoders. Password tests cover wrong/correct passwords, reuse, and encrypted 7z/RAR headers. ZIP CRC verification uses the Rust ZIP reader because compress-tools accepts libarchive data warnings without surfacing checksum failure.
+- Added independent in-memory-provider tests for metadata-only panel listings, cross-provider copy, and ZIP mounting over nonlocal seekable transport. Added cancellation/drop and archive lifetime/read-only tests.
+- All 30 integration/contract tests, strict Clippy, formatting, existing PTY smoke, and new archive PTY smoke passed. The new PTY check verifies directory sizes from metadata, masked retry/cancel, streamed cat, password reuse, copy out, mutation rejection, and parent navigation.
+- Rebuilt Linux x64 release and package. Updated CI to run the archive PTY check on Linux and include VFS/plan documents in artifacts. Other native targets remain unverified.
+
+crates.io publishing follow-up:
+- Added `.github/workflows/publish.yml`, triggered by published GitHub releases. It verifies `v<package.version>`, runs the full native CI matrix through `workflow_call`, verifies the packaged crate, and publishes with the `CARGO_REGISTRY_TOKEN` repository secret.
+- Restricted workflow permissions to repository read access, disabled persisted checkout credentials in publishing jobs, and serialized publish runs. Release tag text enters the version guard through an environment variable.
+- Added package README/license inclusion and restricted Cargo publishing to `crates-io`. There is no configured Git remote from which to populate a repository URL.
+- YAML parsing and version-guard checks passed. Online `cargo publish --locked --dry-run --allow-dirty --registry crates-io` passed for `mc-rs@0.1.0`, including compiling the packaged source. All 30 tests, formatting, YAML checks, and matching/mismatched/injected-tag guard checks passed. No crate was uploaded. The package still warns about missing repository/homepage/documentation metadata because no Git remote is configured.
+- The registry reports `mc@0.1.0` already exists. The user chose `mc-rs`; renamed the package while explicitly preserving library and binary names `mc`. Included a package-local GPL license and added a release guard to keep it synchronized with the root license. The GitHub token and hosted execution still require repository setup.
+
 ### Backend decisions and documented limits
 
-- `compress-tools` 0.16.1 uses system libarchive (3.7.2 on this host) for ZIP/RAR/tar/7z/compressed tar; `flate2` handles standalone gzip. No archive CLI helpers are required.
+- `zip` 2.4.2 handles ZIP including AES/ZipCrypto and CRC checks; `sevenz-rust2` 0.22.2 handles 7z; `rars` 0.9.4 handles RAR. `compress-tools` 0.16.1/system libarchive handles tar/compressed tar; `flate2` handles standalone gzip. No archive CLI helpers are required. Decoder licenses are compatible with GPL-3.0-or-later; no UnRAR-restricted implementation is linked.
 - Linux/macOS discover libarchive using pkg-config. Windows/MSVC uses vcpkg with `x64-windows-static-md`. The backend advertises these platform paths; only Linux runtime behavior is verified here.
 - `trash` 5.2.8 supplies Freedesktop trash, macOS trash, and Windows Recycle Bin implementations. Linux trash behavior is exercised in an isolated test environment. No permanent-delete fallback exists.
 - Editor fallback is `vi` on Unix and `notepad` on Windows; VISUAL/EDITOR arguments use word parsing, never shell evaluation.
 - Filename search uses case-insensitive substrings. Selection uses case-sensitive `*`/`?` wildcards, selecting files by default. Quick search supports wildcard prefixes and next-match cycling.
-- Archives are initially fully extracted, requiring uncompressed-size temporary disk space. No archive writing, nested mounts, password UI, or multipart support. Malformed and unsupported archives report errors.
+- Archive VFS migration supersedes full extraction: metadata indexes plus bounded streams, password UI, and session credentials. Archive writing and multipart support remain excluded. Nested mounts require a seekable source; archive member streams currently do not expose seeking. RAR decoder requires local transport. See `VFS.md` for bounds and remaining limitations.
 - Copies preserve ordinary permissions but not timestamps, ownership, ACLs, extended attributes, sparse layout, or hard-link relationships. Windows symlink creation depends on OS privileges; replacing a symlink may fail safely.
 - Cancellation is cooperative and does not roll back completed items. OS trash calls cannot be cancelled mid-call. Jobs are not persisted across application exit.
 - Listing workers deliver full snapshots; no filesystem watcher. Superseded receivers are discarded, preventing stale results from replacing current navigation.
@@ -239,9 +273,10 @@ Layout follow-up:
 
 - `cargo fmt --manifest-path mc/Cargo.toml --check`.
 - `cargo clippy --manifest-path mc/Cargo.toml --offline --all-targets -- -D warnings`.
-- `cargo test --manifest-path mc/Cargo.toml --offline`: 22 integration tests passed, covering recursive operations, failed/skipped moves, cancellation during copy and conflict, symlinks (including dangling links), unsafe destination directories, all five archive formats, archive traversal/links, cancelled archives, stale listing responses, Unicode input, wildcard selection, path locks, and small/normal rendering.
+- `cargo test --manifest-path mc/Cargo.toml --offline`: 30 integration/contract tests passed, covering recursive operations, failed/skipped moves, cancellation during copy and conflict, symlinks (including dangling links), unsafe destination directories, all five archive formats, archive traversal/links, cancelled archives, stale listing responses, Unicode input, wildcard selection, path locks, and small/normal rendering.
+- `python3 mc/tests/archive_smoke.py`: Linux archive/password PTY smoke passed as detailed above.
 - `python3 mc/tests/terminal_smoke.py`: Linux PTY smoke passed for cat, copy, move, mkdir, default trash, explicit permanent deletion, search-result focus, mouse function-key activation, resize, terminal restoration, a missing external editor, and trash failure without permanent-delete fallback.
-- Native debug and release builds succeeded for `x86_64-unknown-linux-gnu`. Packaged `dist/mc-0.1.0-x86_64-unknown-linux-gnu.tar.gz` with the binary, license, README, and plan.
+- Native debug and release builds succeeded for `x86_64-unknown-linux-gnu`. Packaged `dist/mc-0.1.0-x86_64-unknown-linux-gnu.tar.gz` with the binary, license, README, plan, and VFS architecture document.
 - Linux ARM64, macOS ARM64, and Windows x64 have not been compiled or run in this session. Native CI and release artifacts for those platforms remain unverified.
 
 ## Next session
@@ -250,7 +285,7 @@ Layout follow-up:
 2. Run the configured native CI matrix when repository hosting/runners are available. Resolve any macOS/Windows build, libarchive linking, trash, or terminal differences. Do not mark those platforms verified until actual results exist.
 3. Complete M6 native runtime checks and artifact generation for Linux ARM64, macOS ARM64, and Windows x64. Private repositories may need a different ARM runner entitlement/label.
 4. Exercise larger real-world directories and archives interactively; expand tests only for failures or unresolved concerns. Audit the supported shortcut subset against the manual as functionality expands.
-5. Consider incremental archive indexing, metadata preservation, and improved per-job controls as follow-up improvements; preserve the requested feature scope.
+5. Follow the VFS contract in `VFS.md` when adding remote providers; consider seekable archive member handles, RAR reader transport, incremental indexing, metadata preservation, and improved per-job controls; preserve the requested feature scope.
 
 Run locally from the repository root:
 
@@ -259,3 +294,8 @@ cargo run --manifest-path mc/Cargo.toml --release -- /left/directory /right/dire
 ```
 
 Deferred backlog: SFTP, FTP, and SSH-based remote access; archive creation/modification only if requested later.
+
+2026-09-08 — GitHub publication:
+- User authorized publishing the project to https://github.com/uxsoft/mc-rs.git. The destination has no existing branch refs.
+- Added the repository URL to Cargo metadata and README. Publishing the existing local `master` history, including VFS, menu, tests, and crates.io workflows.
+- This push does not create a GitHub release or publish a crate. Configure `CARGO_REGISTRY_TOKEN` before releasing `v0.1.0`. Hosted CI results still need verification.

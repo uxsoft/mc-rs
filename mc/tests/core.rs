@@ -1,3 +1,4 @@
+use mc::vfs::{Context, VfsPath};
 use mc::{
     archives,
     jobs::{self, Decision, Job, Operation},
@@ -10,6 +11,28 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
+fn start_local(
+    op: Operation,
+    sources: Vec<std::path::PathBuf>,
+    destination: std::path::PathBuf,
+    _: Option<()>,
+) -> Job {
+    jobs::start(
+        op,
+        sources.into_iter().map(Into::into).collect(),
+        destination.into(),
+        Context::default(),
+    )
+}
+fn read_virtual(path: VfsPath) -> Vec<u8> {
+    let mut bytes = vec![];
+    std::io::Read::read_to_end(
+        &mut path.fs.open_read(&path.path, &Context::default()).unwrap(),
+        &mut bytes,
+    )
+    .unwrap();
+    bytes
+}
 fn wait(job: &Job, decision: Decision) -> Option<String> {
     let until = Instant::now() + Duration::from_secs(10);
     loop {
@@ -35,7 +58,7 @@ fn recursive_copy_and_move_preserve_contents() {
     fs::write(source.join("nested/file"), "hello").unwrap();
     assert_eq!(
         wait(
-            &jobs::start(Operation::Copy, vec![source.clone()], dest.clone(), None),
+            &start_local(Operation::Copy, vec![source.clone()], dest.clone(), None),
             Decision::Cancel
         ),
         None
@@ -45,7 +68,7 @@ fn recursive_copy_and_move_preserve_contents() {
     let renamed = d.path().join("renamed");
     assert_eq!(
         wait(
-            &jobs::start(Operation::Move, vec![source.clone()], renamed.clone(), None),
+            &start_local(Operation::Move, vec![source.clone()], renamed.clone(), None),
             Decision::Cancel
         ),
         None
@@ -62,7 +85,7 @@ fn skipped_move_keeps_source_and_destination() {
     fs::write(&b, "old").unwrap();
     assert_eq!(
         wait(
-            &jobs::start(Operation::Move, vec![a.clone()], b.clone(), None),
+            &start_local(Operation::Move, vec![a.clone()], b.clone(), None),
             Decision::Skip
         ),
         None
@@ -79,7 +102,7 @@ fn overwrite_is_explicit_and_failed_move_preserves_source() {
     fs::write(&b, "old").unwrap();
     assert_eq!(
         wait(
-            &jobs::start(Operation::Copy, vec![a.clone()], b.clone(), None),
+            &start_local(Operation::Copy, vec![a.clone()], b.clone(), None),
             Decision::Overwrite
         ),
         None
@@ -87,7 +110,7 @@ fn overwrite_is_explicit_and_failed_move_preserves_source() {
     assert_eq!(fs::read(b).unwrap(), b"new");
     assert!(
         wait(
-            &jobs::start(
+            &start_local(
                 Operation::Move,
                 vec![a.clone()],
                 d.path().join("missing/file"),
@@ -103,7 +126,9 @@ fn overwrite_is_explicit_and_failed_move_preserves_source() {
 fn reject_recursive_self_copy() {
     let d = tempfile::tempdir().unwrap();
     fs::create_dir(d.path().join("child")).unwrap();
-    assert!(jobs::validate_destination(d.path(), &d.path().join("child/copy")).is_err());
+    assert!(
+        jobs::validate_destination(&d.path().into(), &d.path().join("child/copy").into()).is_err()
+    );
 }
 #[test]
 fn cancellation_at_conflict_leaves_both_files_untouched() {
@@ -112,7 +137,7 @@ fn cancellation_at_conflict_leaves_both_files_untouched() {
     let b = d.path().join("b");
     fs::write(&a, "new").unwrap();
     fs::write(&b, "old").unwrap();
-    let job = jobs::start(Operation::Move, vec![a.clone()], b.clone(), None);
+    let job = start_local(Operation::Move, vec![a.clone()], b.clone(), None);
     let until = Instant::now() + Duration::from_secs(5);
     while job.progress.lock().unwrap().conflict.is_none() {
         assert!(Instant::now() < until);
@@ -134,7 +159,7 @@ fn copy_symlink_does_not_follow_it() {
     let out = d.path().join("out");
     assert_eq!(
         wait(
-            &jobs::start(Operation::Copy, vec![link], out.clone(), None),
+            &start_local(Operation::Copy, vec![link], out.clone(), None),
             Decision::Cancel
         ),
         None
@@ -155,7 +180,7 @@ fn recursive_copy_rejects_destination_directory_symlink() {
     std::os::unix::fs::symlink(&outside, dest.join("source/nested")).unwrap();
     assert!(
         wait(
-            &jobs::start(Operation::Copy, vec![source], dest, None),
+            &start_local(Operation::Copy, vec![source], dest, None),
             Decision::Cancel
         )
         .is_some()
@@ -178,11 +203,8 @@ fn zip_tar_and_gzip_are_readable() {
     let d = tempfile::tempdir().unwrap();
     let tar = d.path().join("test.tar");
     fs::write(&tar, tar_bytes()).unwrap();
-    let mount = archives::open(tar, &AtomicBool::new(false), |_| {}).unwrap();
-    assert_eq!(
-        fs::read(mount.temp.path().join("folder/file.txt")).unwrap(),
-        b"hello"
-    );
+    let mount = archives::open(tar.into(), &Context::default(), |_| {}).unwrap();
+    assert_eq!(read_virtual(mount.join("folder/file.txt")), b"hello");
     for (name, data, target) in [
         ("test.tar.gz", tar_bytes(), "folder/file.txt"),
         ("file.txt.gz", b"hello".to_vec(), "file.txt"),
@@ -194,8 +216,8 @@ fn zip_tar_and_gzip_are_readable() {
         );
         enc.write_all(&data).unwrap();
         enc.finish().unwrap();
-        let m = archives::open(path, &AtomicBool::new(false), |_| {}).unwrap();
-        assert_eq!(fs::read(m.temp.path().join(target)).unwrap(), b"hello");
+        let m = archives::open(path.into(), &Context::default(), |_| {}).unwrap();
+        assert_eq!(read_virtual(m.join(target)), b"hello");
     }
     let path = d.path().join("test.zip");
     let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
@@ -203,27 +225,33 @@ fn zip_tar_and_gzip_are_readable() {
         .unwrap();
     zip.write_all(b"hello").unwrap();
     zip.finish().unwrap();
-    let m = archives::open(path, &AtomicBool::new(false), |_| {}).unwrap();
-    assert_eq!(
-        fs::read(m.temp.path().join("folder/file.txt")).unwrap(),
-        b"hello"
-    );
+    let m = archives::open(path.into(), &Context::default(), |_| {}).unwrap();
+    assert_eq!(read_virtual(m.join("folder/file.txt")), b"hello");
 }
 #[test]
 fn rar_and_sevenz_fixtures_are_readable() {
     for format in ["rar", "7z"] {
         let m = archives::open(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/tree.{format}")),
-            &AtomicBool::new(false),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/tree.{format}"))
+                .into(),
+            &Context::default(),
             |_| {},
         )
         .unwrap();
-        assert!(
-            walkdir::WalkDir::new(m.temp.path())
-                .into_iter()
-                .filter_map(Result::ok)
-                .any(|e| e.file_type().is_file())
-        );
+        let mut pending = vec![m];
+        let mut files = 0;
+        while let Some(path) = pending.pop() {
+            for (p, meta) in path.read_dir(&Context::default()).unwrap() {
+                if meta.kind == mc::vfs::Kind::Directory {
+                    pending.push(p);
+                } else {
+                    read_virtual(p);
+                    files += 1;
+                }
+            }
+        }
+        assert!(files > 0);
     }
 }
 #[test]
@@ -248,7 +276,7 @@ fn malicious_zip_and_tar_links_are_rejected() {
         .unwrap();
     zip.write_all(b"evil").unwrap();
     zip.finish().unwrap();
-    assert!(archives::open(path, &AtomicBool::new(false), |_| {}).is_err());
+    assert!(archives::open(path.into(), &Context::default(), |_| {}).is_err());
     assert!(!d.path().join("escape").exists());
     let path = d.path().join("bad.tar");
     let mut tar = tar::Builder::new(fs::File::create(&path).unwrap());
@@ -259,14 +287,24 @@ fn malicious_zip_and_tar_links_are_rejected() {
     h.set_cksum();
     tar.append_link(&mut h, "link", "/tmp").unwrap();
     tar.finish().unwrap();
-    assert!(archives::open(path, &AtomicBool::new(false), |_| {}).is_err());
+    assert!(archives::open(path.into(), &Context::default(), |_| {}).is_err());
 }
 #[test]
 fn cancelled_archive_does_not_return_a_mount() {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("test.tar");
     fs::write(&path, tar_bytes()).unwrap();
-    assert!(archives::open(path, &AtomicBool::new(true), |_| {}).is_err());
+    assert!(
+        archives::open(
+            path.into(),
+            &Context {
+                cancel: std::sync::Arc::new(AtomicBool::new(true)),
+                ..Default::default()
+            },
+            |_| {}
+        )
+        .is_err()
+    );
 }
 #[test]
 fn stale_directory_result_cannot_replace_new_location() {
@@ -275,7 +313,7 @@ fn stale_directory_result_cannot_replace_new_location() {
     fs::write(a.path().join("first"), "").unwrap();
     fs::write(b.path().join("second"), "").unwrap();
     let mut panel = Panel::new(a.path().to_owned());
-    panel.navigate(b.path().to_owned());
+    panel.navigate(b.path().into());
     let until = Instant::now() + Duration::from_secs(3);
     while panel.loading {
         panel.poll();
@@ -297,6 +335,27 @@ fn render_small_and_normal_terminals() {
         let mut app = mc::app::App::new(d.path().to_owned(), d.path().to_owned());
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         term.draw(|f| mc::ui::draw(f, &mut app)).unwrap();
+        for (category, menu) in mc::menu::MENUS.iter().enumerate() {
+            app.menu = Some(mc::menu::State {
+                category,
+                cursor: menu.items.len() - 1,
+                offset: 0,
+            });
+            term.draw(|f| mc::ui::draw(f, &mut app)).unwrap();
+            if w >= 36 && h >= 10 {
+                assert_eq!(
+                    app.menu_area.y, 1,
+                    "dropdown must anchor beneath the menu bar"
+                );
+                assert!(app.menu_area.right() <= w);
+                assert!(
+                    app.menu_area.bottom() < h,
+                    "dropdown must preserve the shortcut bar"
+                );
+                let state = app.menu.as_ref().unwrap();
+                assert!(state.cursor < state.offset + app.menu_area.height as usize - 2);
+            }
+        }
     }
 }
 
@@ -310,7 +369,7 @@ fn cancellation_during_copy_preserves_existing_destination() {
         .set_len(256 * 1024 * 1024)
         .unwrap();
     fs::write(&b, "original").unwrap();
-    let job = jobs::start(Operation::Copy, vec![a.clone()], b.clone(), None);
+    let job = start_local(Operation::Copy, vec![a.clone()], b.clone(), None);
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         let mut p = job.progress.lock().unwrap();
@@ -343,7 +402,7 @@ fn dangling_symlinks_can_be_copied() {
     std::os::unix::fs::symlink("missing", &a).unwrap();
     assert_eq!(
         wait(
-            &jobs::start(Operation::Copy, vec![a], b.clone(), None),
+            &start_local(Operation::Copy, vec![a], b.clone(), None),
             Decision::Cancel
         ),
         None
@@ -352,9 +411,9 @@ fn dangling_symlinks_can_be_copied() {
 }
 #[test]
 fn path_locks_allow_disjoint_work_but_prevent_nested_mutations() {
-    let a = vec![std::path::PathBuf::from("/source/a")];
-    let b = vec![std::path::PathBuf::from("/source/b")];
-    let nested = vec![std::path::PathBuf::from("/source/a/child")];
+    let a = vec![VfsPath::from(std::path::PathBuf::from("/source/a"))];
+    let b = vec![VfsPath::from(std::path::PathBuf::from("/source/b"))];
+    let nested = vec![VfsPath::from(std::path::PathBuf::from("/source/a/child"))];
     assert!(!jobs::overlaps(&a, &b));
     assert!(jobs::overlaps(&a, &nested));
 }
@@ -417,7 +476,7 @@ fn selected_directory_sizes_include_nested_hidden_files_and_selection_total() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert_eq!(p.selection_size(), (10, 0, 0));
-    assert_eq!(p.directory_sizes[&d.path().join("folder")].bytes, 8);
+    assert_eq!(p.directory_sizes[&d.path().join("folder").into()].bytes, 8);
     p.cursor = 1;
     p.toggle();
     assert_eq!(p.selection_size(), (2, 0, 0));
@@ -428,7 +487,7 @@ fn selected_directory_sizes_include_nested_hidden_files_and_selection_total() {
         1,
         "reselection recalculates directory size"
     );
-    p.navigate(d.path().join("folder"));
+    p.navigate(d.path().join("folder").into());
     assert!(p.directory_sizes.is_empty());
     assert_eq!(p.selection_size(), (0, 0, 0));
 }
@@ -441,7 +500,7 @@ fn directory_sizing_does_not_follow_symlink_cycles_or_external_targets() {
     fs::write(d.path().join("outside"), vec![0; 1000]).unwrap();
     std::os::unix::fs::symlink("..", d.path().join("folder/cycle")).unwrap();
     std::os::unix::fs::symlink("../outside", d.path().join("folder/link")).unwrap();
-    let size = mc::panel::directory_size(&d.path().join("folder"), &AtomicBool::new(false));
+    let size = mc::panel::directory_size(&d.path().join("folder").into(), &AtomicBool::new(false));
     assert_eq!(size.bytes, 12); // bytes in the two link paths, not the target contents
     assert_eq!(size.errors, 0);
 }
@@ -450,11 +509,233 @@ fn directory_sizing_does_not_follow_symlink_cycles_or_external_targets() {
 fn directory_sizing_reports_errors_and_honors_cancellation() {
     let d = tempfile::tempdir().unwrap();
     assert!(
-        mc::panel::directory_size(&d.path().join("missing"), &AtomicBool::new(false)).errors > 0
+        mc::panel::directory_size(&d.path().join("missing").into(), &AtomicBool::new(false)).errors
+            > 0
     );
     fs::write(d.path().join("file"), b"content").unwrap();
     assert_eq!(
-        mc::panel::directory_size(d.path(), &AtomicBool::new(true)).bytes,
+        mc::panel::directory_size(&d.path().into(), &AtomicBool::new(true)).bytes,
         0
+    );
+}
+
+fn encrypted_fixture(path: &Path, format: &str, headers: bool) {
+    match format {
+        "zip" => {
+            let mut writer = zip::ZipWriter::new(fs::File::create(path).unwrap());
+            writer
+                .start_file(
+                    "folder/secret.txt",
+                    zip::write::SimpleFileOptions::default()
+                        .with_aes_encryption(zip::AesMode::Aes256, "correct"),
+                )
+                .unwrap();
+            writer.write_all(b"secret contents").unwrap();
+            writer.finish().unwrap();
+        }
+        "7z" => {
+            use sevenz_rust2::{
+                ArchiveEntry, ArchiveWriter, Password,
+                encoder_options::{AesEncoderOptions, Lzma2Options},
+            };
+            let mut writer = ArchiveWriter::new(fs::File::create(path).unwrap()).unwrap();
+            writer.set_content_methods(vec![
+                AesEncoderOptions::new(Password::new("correct")).into(),
+                Lzma2Options::default().into(),
+            ]);
+            writer.set_encrypt_header(headers);
+            writer
+                .push_archive_entry(
+                    ArchiveEntry::new_file("folder/secret.txt"),
+                    Some(&b"secret contents"[..]),
+                )
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        "rar" => {
+            let mut builder = rars::Builder::new(rars::ArchiveVersion::Rar50)
+                .password(Some(b"correct".to_vec()))
+                .header_encryption(headers);
+            builder
+                .add_bytes(
+                    b"folder/secret.txt".to_vec(),
+                    b"secret contents".to_vec(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            builder.write_to_path(path, None).unwrap();
+        }
+        _ => unreachable!(),
+    }
+}
+#[test]
+fn encrypted_archives_retry_and_reuse_session_password() {
+    use std::sync::{Arc, atomic::AtomicUsize, mpsc};
+    for (format, headers) in [
+        ("zip", false),
+        ("7z", false),
+        ("7z", true),
+        ("rar", false),
+        ("rar", true),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join(format!("locked.{format}"));
+        encrypted_fixture(&file, format, headers);
+        let (tx, rx) = mpsc::channel::<mc::vfs::AuthRequest>();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let responder = std::thread::spawn(move || {
+            while let Ok(request) = rx.recv() {
+                let n = count.fetch_add(1, Ordering::Relaxed);
+                assert!(n < 3, "password retry loop");
+                assert_eq!(request.retry, n > 0);
+                request
+                    .reply
+                    .send(Some(mc::vfs::Secret::new(
+                        if n == 0 { "wrong" } else { "correct" }.into(),
+                    )))
+                    .unwrap();
+            }
+        });
+        let ctx = Context {
+            auth: Some(tx),
+            ..Default::default()
+        };
+        let root = archives::open(file.into(), &ctx, |_| {})
+            .unwrap_or_else(|e| panic!("{format} headers={headers}: {e:#}"));
+        let path = root.join("folder/secret.txt");
+        for _ in 0..2 {
+            let mut bytes = vec![];
+            std::io::Read::read_to_end(
+                &mut path.fs.open_read(&path.path, &ctx).unwrap(),
+                &mut bytes,
+            )
+            .unwrap_or_else(|e| panic!("{format} headers={headers}: {e:#}"));
+            assert_eq!(bytes, b"secret contents");
+        }
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            2,
+            "{format} headers={headers}"
+        );
+        assert_eq!(
+            fs::read_dir(d.path()).unwrap().count(),
+            1,
+            "browsing must not extract beside archive"
+        );
+        drop(ctx);
+        responder.join().unwrap();
+    }
+}
+#[test]
+fn archive_metadata_copy_lifetime_and_read_only_capabilities() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("test.tar");
+    fs::write(&file, tar_bytes()).unwrap();
+    let root = archives::open(file.clone().into(), &Context::default(), |_| {}).unwrap();
+    assert!(root.local_path().is_none());
+    assert_eq!(root.parent().unwrap(), d.path().into());
+    assert_eq!(
+        mc::panel::directory_size(&root, &AtomicBool::new(false)).bytes,
+        5
+    );
+    let folder = root.join("folder");
+    let target = d.path().join("out");
+    let job = jobs::start(
+        Operation::Copy,
+        vec![folder.clone()],
+        target.clone().into(),
+        Context::default(),
+    );
+    drop(root);
+    assert_eq!(wait(&job, Decision::Cancel), None);
+    assert_eq!(fs::read(target.join("file.txt")).unwrap(), b"hello");
+    for op in [Operation::Move, Operation::Delete, Operation::Trash] {
+        assert!(
+            wait(
+                &jobs::start(
+                    op,
+                    vec![folder.clone()],
+                    d.path().join("bad").into(),
+                    Context::default()
+                ),
+                Decision::Cancel
+            )
+            .is_some()
+        );
+    }
+    assert!(jobs::overlaps(&job.resources, &[file.into()]));
+}
+#[test]
+fn password_cancellation_preserves_destination() {
+    use std::sync::mpsc;
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("locked.zip");
+    encrypted_fixture(&file, "zip", false);
+    let root = archives::open(file.into(), &Context::default(), |_| {}).unwrap();
+    let target = d.path().join("target");
+    fs::write(&target, b"original").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let ctx = Context {
+        auth: Some(tx),
+        ..Default::default()
+    };
+    let job = jobs::start(
+        Operation::Copy,
+        vec![root.join("folder/secret.txt")],
+        target.clone().into(),
+        ctx,
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(conflict) = job.progress.lock().unwrap().conflict.take() {
+            conflict.reply.send(Decision::Overwrite).unwrap();
+        }
+        if let Ok(request) = rx.try_recv() {
+            request.reply.send(None).unwrap();
+            break;
+        }
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(wait(&job, Decision::Cancel).is_some());
+    assert_eq!(fs::read(target).unwrap(), b"original");
+    assert_eq!(fs::read_dir(d.path()).unwrap().count(), 2);
+}
+#[test]
+fn metadata_browsing_does_not_decode_corrupt_payload() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("test.zip");
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file(
+            "file",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+    writer.write_all(b"unique payload").unwrap();
+    let mut bytes = writer.finish().unwrap().into_inner();
+    let pos = bytes
+        .windows(14)
+        .position(|w| w == b"unique payload")
+        .unwrap();
+    bytes[pos] ^= 0xff;
+    fs::write(&file, bytes).unwrap();
+    let root = archives::open(file.into(), &Context::default(), |_| {}).unwrap();
+    assert_eq!(root.read_dir(&Context::default()).unwrap().len(), 1);
+    let p = root.join("file");
+    let mut bytes = vec![];
+    assert!(
+        std::io::Read::read_to_end(
+            &mut p.fs.open_read(&p.path, &Context::default()).unwrap(),
+            &mut bytes
+        )
+        .is_err()
+    );
+    assert!(
+        bytes.is_empty(),
+        "validation must not release corrupt plaintext"
     );
 }

@@ -1,6 +1,6 @@
 # mc
 
-A modern dual-panel terminal file manager written in Rust and Ratatui. The binary is named `mc`. It preserves the familiar Midnight Commander keys for supported operations, with a dark interface and mouse navigation.
+A modern dual-panel terminal file manager written in Rust and Ratatui. The crates.io package is named `mc-rs`; the binary is named `mc`. It preserves the familiar Midnight Commander keys for supported operations, with a dark interface and mouse navigation.
 
 ## Build and run
 
@@ -27,7 +27,7 @@ Linux and macOS binaries dynamically link libarchive, which must also be install
 
 - Browse independent panels, sort by name/size/date through F9, toggle hidden files, and select multiple items with Space, Insert, or right-click. Selected directories are sized recursively in the background; their size appears in the Size column, and the selection total appears in each panel’s bottom border. Hidden files are included; symlinks are counted by link length without following their targets. Unreadable entries mark totals as partial. Ctrl+R refreshes cached sizes.
 - Copy and move into the opposite panel, or enter a new destination/name. Same-filesystem moves use an atomic no-replace rename where possible. Cross-filesystem moves and directory merges copy before removing source data.
-- Jobs run in the background. Unrelated jobs can run together; jobs with overlapping source/destination paths are rejected until the running job finishes. F9 → Background jobs shows progress, errors, and cancellation.
+- Jobs run in the background. Unrelated jobs can run together; jobs with overlapping source/destination paths are rejected until the running job finishes. F9 → File → Background jobs shows progress, errors, and cancellation.
 - An existing file prompts for overwrite, skip, overwrite all, or skip all. Enter defaults to skip. Directory copies merge into existing plain directories; incompatible file/directory collisions stop with an error.
 - F8 defaults to the operating system's trash. Choose permanent deletion explicitly with Tab or the mouse. Trash failures never fall back to permanent deletion.
 - Recursive filename search matches a case-insensitive substring, reports unreadable paths, and stops at 100,000 results. Enter navigates to and highlights the selected result. Directory symlinks are not traversed.
@@ -60,15 +60,23 @@ Linux and macOS binaries dynamically link libarchive, which must also be install
 
 Esc followed by a digit substitutes for a function key (`0` means F10). Esc followed by a letter substitutes for Alt. Input dialogs support arrows, Home/End, Backspace/Delete, Ctrl+A/E/B/F/H/D/K/U. Keyboard bindings are fixed; there is no configuration system.
 
-Click to focus a panel and position the cursor; right-click toggles selection; double-click opens; the wheel scrolls. Function-key labels and menu choices are clickable. In deletion dialogs, click the deletion mode, then confirm.
+Click to focus a panel and position the cursor; right-click toggles selection; double-click opens; the wheel scrolls. The persistent File / View / Go / Help bar opens dropdowns beneath each label. F9 opens File; Left/Right or Tab switch menus, Up/Down select actions, Enter activates, and Esc/F9 dismisses. Mouse hover switches open menus and highlights actions; clicking outside dismisses them. Function-key labels and menu choices are clickable. In deletion dialogs, click the deletion mode, then confirm.
 
 ## Archives
 
 Enter opens ZIP, RAR, tar, 7z, `.tar.gz`, `.tgz`, or `.gz` in a read-only panel. F5 copies entries to a local destination; F3 views a file via `cat`. Parent navigation at the archive root returns to the containing directory.
 
-Archives are fully unpacked in a worker into private temporary storage before browsing. This uses disk space proportional to the uncompressed archive; opening can be cancelled. libarchive supplies ZIP/RAR/tar/7z decoding; flate2 supplies standalone gzip decompression. No `7z`, `unrar`, or `tar` executables are needed. Archive writing, nested archive mounting, password entry, and multipart archives are not supported. Backend decode failures are reported.
+Archive panels keep an entry index in memory. Navigation, filename search, and directory sizing use that index; payloads are decoded only when reading/copying a member. `cat` receives a stream on stdin. Copies use the destination provider's staged write handle; local copies need space only for the file being copied, not the whole browsing tree.
 
-Archive paths are checked for absolute paths, traversal, and Windows path syntax. Links and special entries are rejected instead of restored. Duplicate file entries also fail safely. This is deliberately more restrictive than general-purpose archive extractors.
+ZIP (AES and ZipCrypto), 7z, and RAR can request a password. Enter submits, Esc cancels; incorrect passwords can be retried. The field is masked and credentials stay in the archive session, never in paths, command arguments, or configuration files. The application's password buffers are zeroized when dropped; decoder libraries may keep their own copies. Passwords are forgotten when the last panel, job, or open handle releases that session.
+
+ZIP uses the Rust `zip` decoder, 7z uses `sevenz-rust2`, RAR uses `rars`, tar uses libarchive, and gzip uses flate2. No archive CLI helpers are needed. ZIP supports stored/deflated content; other compression methods may report unsupported. Multipart archives and archive modification remain unsupported. Nested archive browsing needs a seekable source; archive-member streams currently do not provide one. RAR currently needs a local archive file, isolated within its VFS adapter.
+
+Decoded output uses a bounded channel (two 64 KiB chunks), plus decoder dictionaries and the metadata index. A validation pass precedes streaming the selected member, so password retries cannot release incorrect plaintext; this reads selected content twice. Solid archives can require decoding preceding members too. Compressed tar header scanning and standalone gzip size calculation may require decompressing the compressed stream, without writing it to disk. Some RAR5 transforms need buffered decoding, capped at 32 MiB; decoder dictionary memory is additional.
+
+Archive paths reject absolute paths, traversal, Windows path syntax, and duplicate/conflicting names. Unsupported link/special entries fail rather than being restored as filesystem links. If the backing archive's size or modification time changes, leave and reopen it.
+
+Local files and archives share a provider interface, typed locations, and owned handles inspired by Midnight Commander's VFS. See [VFS.md](VFS.md) for the architecture and future remote-backend contract.
 
 ## Current limits
 
@@ -86,11 +94,28 @@ cargo clippy --manifest-path mc/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path mc/Cargo.toml
 cargo build --manifest-path mc/Cargo.toml
 python3 mc/tests/terminal_smoke.py  # Linux/Unix pseudo-terminal integration test
+python3 mc/tests/archive_smoke.py   # encrypted archives, streamed cat, copy, retry/cancel
 ```
 
 Tests use disposable files. The terminal smoke test redirects the Linux trash location to its own temporary directory. It exercises cat, copying, moving, mkdir, both deletion modes, search-result selection, mouse input, resize, and terminal restoration.
 
 See [PLAN.md](PLAN.md) for progress, architecture, acceptance criteria, and the next session's tasks.
+
+## Publishing to crates.io
+
+`.github/workflows/publish.yml` publishes when a GitHub release is published, including a prerelease. The release tag must be exactly `v` followed by the version in `mc/Cargo.toml` (for example, `v0.2.0`). It runs the existing native CI matrix first, builds and verifies the packaged crate with `cargo publish --dry-run`, then publishes it. Draft releases and ordinary pushes do not publish.
+
+Before the first release:
+
+1. Use an unpublished version of the `mc-rs` crate in `mc/Cargo.toml` and update `mc/Cargo.lock`. The package explicitly retains the binary name `mc`. Keep `mc/LICENSE` synchronized with the root `LICENSE`; the release guard checks this.
+2. Add a crates.io API token with publishing permission for the chosen crate as the GitHub Actions repository secret `CARGO_REGISTRY_TOKEN`. Create/manage the token in [crates.io account settings](https://crates.io/settings/tokens); do not commit it.
+3. Commit the workflows, package metadata, lockfile, and all source/fixture changes. Create and push a matching version tag, then publish a GitHub release for that tag. The workflow publishes the tagged source after all four native jobs pass.
+
+After publication, users can install with `cargo install mc-rs --locked` (with the build dependencies above installed).
+
+The token is exposed only to the final publish step. GitHub permissions are limited to reading repository contents, and publish runs are serialized. A failed job can be rerun from Actions after resolving its cause; already-published crate versions are immutable. See the [Cargo publishing documentation](https://doc.rust-lang.org/cargo/reference/publishing.html).
+
+Source repository: [uxsoft/mc-rs](https://github.com/uxsoft/mc-rs). Configure the publishing token in that repository before publishing a release.
 
 ## License and references
 

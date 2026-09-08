@@ -1,9 +1,19 @@
 [package]
-name = "mc"
+name = "mc-rs"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+readme = "../README.md"
+publish = ["crates-io"]
 description = "A modern dual-panel terminal file manager"
+repository = "https://github.com/uxsoft/mc-rs"
+
+[lib]
+name = "mc"
+
+[[bin]]
+name = "mc"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -11,16 +21,19 @@ ratatui = "0.30"
 crossterm = "0.29"
 trash = "5"
 tempfile = "3"
-walkdir = "2"
 compress-tools = "0.16"
 flate2 = "1"
 shell-words = "1"
 chrono = "0.4"
 ctrlc = "3"
+zeroize = "1"
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
+rars = "0.9"
+zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress", "aes256"] }

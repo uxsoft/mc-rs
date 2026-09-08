@@ -1,8 +1,10 @@
 use crate::{
     archives, external,
     jobs::{self, Decision, Job, Operation},
-    panel::{Mount, Panel, Sort},
+    menu::{self, MENUS},
+    panel::Panel,
     ui,
+    vfs::{AuthRequest, Context, Kind, Secret, VfsPath},
 };
 use anyhow::Result;
 use crossterm::event::{
@@ -33,9 +35,6 @@ pub enum Dialog {
         title: String,
         text: String,
     },
-    Menu {
-        cursor: usize,
-    },
     Jobs,
     Quit,
 }
@@ -50,22 +49,37 @@ pub enum Purpose {
     Unselect,
 }
 pub struct Search {
-    pub results: Arc<Mutex<Vec<PathBuf>>>,
+    pub results: Arc<Mutex<Vec<VfsPath>>>,
     pub done: Arc<AtomicBool>,
     pub cancel: Arc<AtomicBool>,
     pub errors: Arc<Mutex<usize>>,
     pub cursor: usize,
 }
 pub struct ArchiveTask {
-    pub receiver: mpsc::Receiver<Result<Arc<Mount>>>,
+    pub receiver: mpsc::Receiver<Result<VfsPath>>,
     pub cancel: Arc<AtomicBool>,
     pub bytes: Arc<Mutex<u64>>,
     pub panel: usize,
 }
+pub struct PasswordDialog {
+    pub request: AuthRequest,
+    pub value: Secret,
+}
+pub struct ViewTask {
+    pub receiver: mpsc::Receiver<Result<Box<dyn std::io::Read + Send>>>,
+    pub cancel: Arc<AtomicBool>,
+}
 pub struct App {
+    pub password: Option<PasswordDialog>,
+    auth_tx: mpsc::Sender<AuthRequest>,
+    auth_rx: mpsc::Receiver<AuthRequest>,
+    pub viewing: Option<ViewTask>,
     pub panels: [Panel; 2],
     pub active: usize,
     pub dialog: Option<Dialog>,
+    pub menu: Option<menu::State>,
+    pub menu_tabs: [ratatui::layout::Rect; 4],
+    pub menu_area: ratatui::layout::Rect,
     pub jobs: Vec<Job>,
     pub search: Option<Search>,
     pub archive: Option<ArchiveTask>,
@@ -82,10 +96,25 @@ pub struct App {
 }
 impl App {
     pub fn new(left: PathBuf, right: PathBuf) -> Self {
+        let (auth_tx, auth_rx) = mpsc::channel();
+        let ctx = Context {
+            auth: Some(auth_tx.clone()),
+            ..Default::default()
+        };
         Self {
-            panels: [Panel::new(left), Panel::new(right)],
+            password: None,
+            auth_tx,
+            auth_rx,
+            viewing: None,
+            panels: [
+                Panel::with_context(left, ctx.clone()),
+                Panel::with_context(right, ctx),
+            ],
             active: 0,
             dialog: None,
+            menu: None,
+            menu_tabs: Default::default(),
+            menu_area: Default::default(),
             jobs: vec![],
             search: None,
             archive: None,
@@ -116,6 +145,17 @@ impl App {
     pub fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         while !self.quit {
             self.poll();
+            if let Some(result) = self
+                .viewing
+                .as_ref()
+                .and_then(|v| v.receiver.try_recv().ok())
+            {
+                self.viewing = None;
+                let result = result.and_then(|reader| external::cat_stream(reader, terminal));
+                if let Err(e) = result {
+                    self.message("View file", e.to_string());
+                }
+            }
             terminal.draw(|frame| ui::draw(frame, self))?;
             if event::poll(Duration::from_millis(40))? {
                 match event::read()? {
@@ -128,8 +168,28 @@ impl App {
         Ok(())
     }
     pub fn poll(&mut self) {
+        if self
+            .password
+            .as_ref()
+            .is_some_and(|p| p.request.cancel.load(Ordering::Relaxed))
+        {
+            self.password = None;
+        }
+        if self.password.is_none()
+            && let Ok(request) = self.auth_rx.try_recv()
+        {
+            self.password = Some(PasswordDialog {
+                request,
+                value: Secret::new(String::with_capacity(256)),
+            });
+        }
         for p in &mut self.panels {
             p.poll();
+        }
+        for job in &mut self.jobs {
+            if job.progress.lock().unwrap().done {
+                job.resources.clear();
+            }
         }
         let done = self
             .jobs
@@ -152,8 +212,7 @@ impl App {
             match result {
                 Ok(mount) => {
                     let p = &mut self.panels[task.panel];
-                    p.navigate(mount.temp.path().to_owned());
-                    p.mount = Some(mount);
+                    p.navigate(mount);
                     self.status = "Archive · read only · F5 extracts to the other panel".into();
                 }
                 Err(e) => self.message("Archive", e.to_string()),
@@ -171,17 +230,15 @@ impl App {
             purpose,
         });
     }
-    fn start(&mut self, op: Operation, destination: PathBuf) {
-        if self.panel().mount.is_some() && op != Operation::Copy {
+    fn start(&mut self, op: Operation, destination: VfsPath) {
+        if !self.panel().path.fs.capabilities().write && op != Operation::Copy {
             self.message(
                 "Read-only archive",
                 "Archive entries can be viewed and copied out. Modification is unavailable.",
             );
             return;
         }
-        if self.panels[1 - self.active].mount.is_some()
-            && matches!(op, Operation::Copy | Operation::Move)
-        {
+        if !destination.fs.capabilities().write && matches!(op, Operation::Copy | Operation::Move) {
             self.message(
                 "Read-only destination",
                 "Leave the archive in the destination panel first.",
@@ -203,7 +260,10 @@ impl App {
             op,
             sources,
             destination,
-            self.panel().mount.clone(),
+            Context {
+                auth: Some(self.auth_tx.clone()),
+                ..Default::default()
+            },
         ));
         self.status = "Working in background · F9 → Background jobs".into();
     }
@@ -218,14 +278,23 @@ impl App {
         if let Some(entry) = self.panel().current().cloned() {
             if entry.directory {
                 self.panel_mut().navigate(entry.path);
-            } else if archives::supported(&entry.path) && self.panel().mount.is_none() {
+            } else if archives::supported(&entry.path) {
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
                 let bytes = Arc::new(Mutex::new(0));
                 let c = cancel.clone();
                 let b = bytes.clone();
+                let auth = self.auth_tx.clone();
                 std::thread::spawn(move || {
-                    let result = archives::open(entry.path, &c, |n| *b.lock().unwrap() = n);
+                    let result = archives::open(
+                        entry.path,
+                        &Context {
+                            cancel: c,
+                            auth: Some(auth),
+                            ..Default::default()
+                        },
+                        |n| *b.lock().unwrap() = n,
+                    );
                     let _ = tx.send(result);
                 });
                 self.archive = Some(ArchiveTask {
@@ -241,7 +310,7 @@ impl App {
         Ok(())
     }
     fn view(&mut self, edit: bool, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-        if edit && self.panel().mount.is_some() {
+        if edit && !self.panel().path.fs.capabilities().write {
             self.message(
                 "Read-only archive",
                 "Copy the file to a local directory before editing.",
@@ -252,8 +321,34 @@ impl App {
             && !e.directory
         {
             let path = e.path.clone();
-            if let Err(e) = external::launch(&path, edit, terminal) {
-                self.message("External program", e.to_string());
+            if let Some(local) = path.local_path() {
+                if let Err(e) = external::launch(&local, edit, terminal) {
+                    self.message("External program", e.to_string());
+                }
+            } else if edit {
+                self.message(
+                    "Editor",
+                    "Copy this file to a local directory before editing.",
+                );
+            } else {
+                let (tx, receiver) = mpsc::channel();
+                let ctx = Context {
+                    auth: Some(self.auth_tx.clone()),
+                    ..Default::default()
+                };
+                let cancel = ctx.cancel.clone();
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let result = (|| -> Result<Box<dyn Read + Send>> {
+                        let mut reader = path.fs.open_read(&path.path, &ctx)?;
+                        let mut first = vec![0; 64 * 1024];
+                        let n = reader.read(&mut first)?;
+                        first.truncate(n);
+                        Ok(Box::new(std::io::Cursor::new(first).chain(reader)))
+                    })();
+                    let _ = tx.send(result);
+                });
+                self.viewing = Some(ViewTask { receiver, cancel });
             }
             self.panel_mut().refresh();
         }
@@ -266,7 +361,7 @@ impl App {
             5 | 6 => { if !self.panel().sources().is_empty() { self.input(if n == 5 { Purpose::Copy } else { Purpose::Move }, if n == 5 { "Copy to" } else { "Move to" }, self.panels[1-self.active].path.display().to_string()); } }
             7 => self.input(Purpose::Mkdir, "Create directory", String::new()),
             8 => { if !self.panel().sources().is_empty() { self.dialog = Some(Dialog::Delete { permanent: false }); } }
-            9 => self.dialog = Some(Dialog::Menu { cursor: 0 }),
+            9 => { self.quick.clear(); self.menu = Some(menu::State::default()); },
             10 => { if self.busy() { self.dialog = Some(Dialog::Quit); } else { self.quit = true; } }, _ => {}
         }
         Ok(())
@@ -293,6 +388,40 @@ impl App {
         false
     }
     pub fn key(&mut self, mut k: KeyEvent, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        if k.code == K::Char('l') && k.modifiers == M::CONTROL {
+            terminal.clear()?;
+            return Ok(());
+        }
+        if let Some(mut password) = self.password.take() {
+            match k.code {
+                K::Enter => {
+                    let _ = password.request.reply.send(Some(password.value));
+                    return Ok(());
+                }
+                K::Esc => {
+                    let _ = password.request.reply.send(None);
+                    return Ok(());
+                }
+                K::Backspace => {
+                    password.value.pop();
+                }
+                K::Char(c)
+                    if !k.modifiers.intersects(M::CONTROL | M::ALT)
+                        && password.value.len() + c.len_utf8() <= 256 =>
+                {
+                    password.value.push(c)
+                }
+                _ => {}
+            }
+            self.password = Some(password);
+            return Ok(());
+        }
+        if let Some(view) = &self.viewing {
+            if k.code == K::Esc {
+                view.cancel.store(true, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
         if self.conflict_key(k) {
             return Ok(());
         }
@@ -301,6 +430,9 @@ impl App {
                 archive.cancel.store(true, Ordering::Relaxed);
             }
             return Ok(());
+        }
+        if self.menu.is_some() {
+            return self.menu_key(k, terminal);
         }
         if let Some(dialog) = self.dialog.take() {
             return self.dialog_key(dialog, k, terminal);
@@ -410,11 +542,8 @@ impl App {
                 "Go to directory",
                 self.panel().path.display().to_string(),
             ),
-            (K::Char('l'), M::CONTROL) => terminal.clear()?,
             (K::Char('i'), M::ALT) => {
                 let path = self.panel().path.clone();
-                let mount = self.panel().mount.clone();
-                self.panels[1 - self.active].mount = mount;
                 self.panels[1 - self.active].navigate(path);
             }
             (K::Char('g' | 'r' | 'j'), M::ALT) => {
@@ -435,8 +564,6 @@ impl App {
                     .filter(|e| e.directory)
                     .map(|e| e.path.clone())
                     .unwrap_or_else(|| self.panel().path.clone());
-                let mount = self.panel().mount.clone();
-                self.panels[1 - self.active].mount = mount;
                 self.panels[1 - self.active].navigate(path);
                 self.panel_mut().step(1);
             }
@@ -459,6 +586,59 @@ impl App {
             self.panel_mut().cursor = i + 1;
         }
         self.status = format!("Quick search: {query}");
+    }
+    fn menu_key(&mut self, key: KeyEvent, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        let state = self.menu.as_mut().unwrap();
+        let count = MENUS[state.category].items.len();
+        match key.code {
+            K::Esc | K::F(9) => self.menu = None,
+            K::Left | K::BackTab => {
+                *state = menu::State {
+                    category: (state.category + MENUS.len() - 1) % MENUS.len(),
+                    ..Default::default()
+                }
+            }
+            K::Right | K::Tab => {
+                *state = menu::State {
+                    category: (state.category + 1) % MENUS.len(),
+                    ..Default::default()
+                }
+            }
+            K::Up => state.cursor = (state.cursor + count - 1) % count,
+            K::Down => state.cursor = (state.cursor + 1) % count,
+            K::Home => state.cursor = 0,
+            K::End => state.cursor = count - 1,
+            K::Enter => {
+                let action = MENUS[state.category].items[state.cursor].action;
+                self.menu = None;
+                match action {
+                    menu::Action::Function(n) => self.function(n, terminal)?,
+                    menu::Action::Sort(sort) => {
+                        let p = self.panel_mut();
+                        p.sort = sort;
+                        p.sort_entries();
+                        p.cursor = 0;
+                    }
+                    menu::Action::Hidden => {
+                        let p = self.panel_mut();
+                        p.hidden = !p.hidden;
+                        p.refresh();
+                    }
+                    menu::Action::Refresh => self.panel_mut().refresh(),
+                    menu::Action::Goto => self.input(
+                        Purpose::Goto,
+                        "Go to directory",
+                        self.panel().path.display().to_string(),
+                    ),
+                    menu::Action::Find => {
+                        self.input(Purpose::Search, "Find filename (substring)", String::new())
+                    }
+                    menu::Action::Jobs => self.dialog = Some(Dialog::Jobs),
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
     fn dialog_key(
         &mut self,
@@ -491,7 +671,7 @@ impl App {
                         } else {
                             Operation::Trash
                         },
-                        PathBuf::new(),
+                        self.panel().path.clone(),
                     );
                     return Ok(());
                 }
@@ -502,40 +682,6 @@ impl App {
                     return Ok(());
                 }
             }
-            Dialog::Menu { cursor } => match k.code {
-                K::Up => *cursor = cursor.saturating_sub(1),
-                K::Down => *cursor = (*cursor + 1).min(6),
-                K::Enter => {
-                    match *cursor {
-                        0 => self.input(
-                            Purpose::Goto,
-                            "Go to directory",
-                            self.panel().path.display().to_string(),
-                        ),
-                        1 => {
-                            self.input(Purpose::Search, "Find filename (substring)", String::new())
-                        }
-                        2..=4 => {
-                            let p = self.panel_mut();
-                            p.sort = match *cursor {
-                                2 => Sort::Name,
-                                3 => Sort::Size,
-                                _ => Sort::Modified,
-                            };
-                            p.sort_entries();
-                            p.cursor = 0;
-                        }
-                        5 => self.dialog = Some(Dialog::Jobs),
-                        _ => {
-                            let p = self.panel_mut();
-                            p.hidden = !p.hidden;
-                            p.refresh();
-                        }
-                    }
-                    return Ok(());
-                }
-                _ => {}
-            },
             Dialog::Jobs => {
                 if k.code == K::Char('c') {
                     for j in &self.jobs {
@@ -561,13 +707,15 @@ impl App {
     }
     fn submit(&mut self, purpose: Purpose, value: String) {
         let path = if matches!(purpose, Purpose::Copy | Purpose::Move)
-            && value == self.panels[1 - self.active].path.display().to_string()
+            && value == self.panels[1 - self.active].path.display()
         {
             self.panels[1 - self.active].path.clone()
+        } else if value == self.panel().path.display() {
+            self.panel().path.clone()
         } else {
             let p = PathBuf::from(&value);
             if p.is_absolute() {
-                p
+                p.into()
             } else {
                 self.panel().path.join(p)
             }
@@ -582,7 +730,6 @@ impl App {
             }
             Purpose::Goto => {
                 if path.is_dir() {
-                    self.panel_mut().mount = None;
                     self.panel_mut().navigate(path);
                 } else {
                     self.message(
@@ -620,27 +767,40 @@ impl App {
         let c = cancel.clone();
         let e = errors.clone();
         let path = self.panel().path.clone();
-        let mount = self.panel().mount.clone();
+        let ctx = Context {
+            cancel: c.clone(),
+            auth: Some(self.auth_tx.clone()),
+            ..Default::default()
+        };
         std::thread::spawn(move || {
-            let _mount = mount;
             let query = query.to_lowercase();
-            for item in walkdir::WalkDir::new(path).follow_links(false).min_depth(1) {
-                if c.load(Ordering::Relaxed) {
+            let mut pending = vec![path];
+            'scan: while let Some(path) = pending.pop() {
+                if ctx.check().is_err() {
                     break;
                 }
-                match item {
-                    Ok(item) => {
-                        if item
-                            .file_name()
-                            .to_string_lossy()
-                            .to_lowercase()
-                            .contains(&query)
-                        {
-                            let mut results = r.lock().unwrap();
-                            if results.len() >= 100_000 {
-                                break;
+                match path.read_dir(&ctx) {
+                    Ok(entries) => {
+                        for (path, meta) in entries {
+                            if ctx.check().is_err() {
+                                break 'scan;
                             }
-                            results.push(item.path().to_owned());
+                            if path
+                                .file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .to_lowercase()
+                                .contains(&query)
+                            {
+                                let mut results = r.lock().unwrap();
+                                if results.len() >= 100_000 {
+                                    break 'scan;
+                                }
+                                results.push(path.clone());
+                            }
+                            if meta.kind == Kind::Directory {
+                                pending.push(path);
+                            }
                         }
                     }
                     Err(_) => *e.lock().unwrap() += 1,
@@ -691,6 +851,9 @@ impl App {
         m: event::MouseEvent,
         terminal: &mut ratatui::DefaultTerminal,
     ) -> Result<()> {
+        if self.password.is_some() || self.viewing.is_some() {
+            return Ok(());
+        }
         let click = m.kind == MouseEventKind::Down(MouseButton::Left);
         let area = self.dialog_area;
         let inside = m.column >= area.x
@@ -720,12 +883,49 @@ impl App {
             }
             return Ok(());
         }
+        if self.menu.is_some() {
+            if let Some(category) = self
+                .menu_tabs
+                .iter()
+                .position(|r| r.contains((m.column, m.row).into()))
+            {
+                if click || m.kind == MouseEventKind::Moved {
+                    let state = self.menu.as_mut().unwrap();
+                    if category != state.category {
+                        *state = menu::State {
+                            category,
+                            ..Default::default()
+                        };
+                    } else if click {
+                        self.menu = None;
+                    }
+                }
+            } else if self.menu_area.contains((m.column, m.row).into()) {
+                let row = m.row.saturating_sub(self.menu_area.y + 1) as usize;
+                let state = self.menu.as_mut().unwrap();
+                if m.row > self.menu_area.y && m.row < self.menu_area.bottom() - 1 {
+                    state.cursor = (state.offset + row).min(MENUS[state.category].items.len() - 1);
+                    if click {
+                        return self.menu_key(KeyEvent::new(K::Enter, M::NONE), terminal);
+                    }
+                }
+                if m.kind == MouseEventKind::ScrollDown {
+                    return self.menu_key(KeyEvent::new(K::Down, M::NONE), terminal);
+                }
+                if m.kind == MouseEventKind::ScrollUp {
+                    return self.menu_key(KeyEvent::new(K::Up, M::NONE), terminal);
+                }
+            } else if click {
+                self.menu = None;
+            }
+            return Ok(());
+        }
         if self.dialog.is_some() {
             if click && inside {
                 let relative_x = m.column - area.x;
                 if m.row == area.bottom().saturating_sub(2) {
                     let code = match &self.dialog {
-                        Some(Dialog::Message { .. } | Dialog::Menu { .. }) => K::Esc,
+                        Some(Dialog::Message { .. }) => K::Esc,
                         Some(Dialog::Jobs) if relative_x < 17 => K::Char('c'),
                         Some(Dialog::Jobs) => K::Esc,
                         _ if relative_x < 16 => K::Enter,
@@ -736,10 +936,6 @@ impl App {
                 match self.dialog.as_mut().unwrap() {
                     Dialog::Delete { permanent } if m.row == area.y + 3 => {
                         *permanent = relative_x >= 22
-                    }
-                    Dialog::Menu { cursor } if m.row > area.y && m.row < area.y + 8 => {
-                        *cursor = (m.row - area.y - 1) as usize;
-                        return self.key(KeyEvent::new(K::Enter, M::NONE), terminal);
                     }
                     _ => {}
                 }
@@ -777,7 +973,18 @@ impl App {
             return Ok(());
         }
         if click && m.row == 0 {
-            return self.function(9, terminal);
+            if let Some(category) = self
+                .menu_tabs
+                .iter()
+                .position(|r| r.contains((m.column, m.row).into()))
+            {
+                self.quick.clear();
+                self.menu = Some(menu::State {
+                    category,
+                    ..Default::default()
+                });
+            }
+            return Ok(());
         }
         if m.row == self.height.saturating_sub(1)
             && m.kind == MouseEventKind::Down(MouseButton::Left)
@@ -825,6 +1032,9 @@ impl App {
 }
 impl Drop for App {
     fn drop(&mut self) {
+        if let Some(v) = &self.viewing {
+            v.cancel.store(true, Ordering::Relaxed);
+        }
         if let Some(s) = &self.search {
             s.cancel.store(true, Ordering::Relaxed);
         }

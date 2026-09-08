@@ -1,4 +1,7 @@
-use crate::app::{App, Dialog};
+use crate::{
+    app::{App, Dialog},
+    menu::{Action, MENUS},
+};
 use ratatui::{prelude::*, widgets::*};
 use std::sync::atomic::Ordering;
 const BG: Color = Color::Rgb(19, 23, 31);
@@ -60,14 +63,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(area);
+    let bar_style = Style::default().fg(FG).bg(Color::Rgb(30, 38, 49));
+    frame.render_widget(Block::default().style(bar_style), rows[0]);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" mc ", Style::default().fg(BG).bg(ACCENT).bold()),
-            Span::styled("  FILES", Style::default().fg(FG).bold()),
-            Span::styled("    F9 Menu    Alt+? Find", Style::default().fg(DIM)),
-        ])),
-        rows[0],
+        Paragraph::new(" mc ").style(
+            Style::default()
+                .fg(ACCENT)
+                .bg(Color::Rgb(30, 38, 49))
+                .bold(),
+        ),
+        Rect::new(area.x, area.y, 4, 1),
     );
+    let mut x = area.x + 4;
+    for (i, menu) in MENUS.iter().enumerate() {
+        let rect = Rect::new(x, area.y, menu.label.len() as u16 + 2, 1);
+        app.menu_tabs[i] = rect;
+        let style = if app.menu.as_ref().is_some_and(|m| m.category == i) {
+            Style::default().fg(BG).bg(ACCENT).bold()
+        } else {
+            bar_style
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {} ", menu.label)).style(style),
+            rect,
+        );
+        x = rect.right();
+    }
     let panels =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
     for (i, &rect) in panels.iter().enumerate() {
@@ -87,7 +108,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         };
         let title = format!(
             " {}{} ",
-            if p.mount.is_some() { "▣ " } else { "" },
+            if !p.path.fs.capabilities().write {
+                "▣ "
+            } else {
+                ""
+            },
             p.label()
         );
         let bottom = if p.selected.is_empty() {
@@ -267,6 +292,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         drop(results);
         popup(frame, app, "Find files", Text::from(lines), 19);
     }
+    draw_menu(frame, app);
     if let Some(dialog) = &app.dialog {
         let (title, text, height) = match dialog {
             Dialog::Input {
@@ -308,31 +334,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 title.clone(),
                 Text::from(format!("{text}\n\nEnter / Esc: close")),
                 (text.lines().count() + 5).min(25) as u16,
-            ),
-            Dialog::Menu { cursor } => (
-                "Menu".into(),
-                Text::from(
-                    [
-                        "Go to directory",
-                        "Find filename",
-                        "Sort by name",
-                        "Sort by size",
-                        "Sort by modified",
-                        "Background jobs",
-                        "Toggle hidden files",
-                    ]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        Line::styled(
-                            format!(" {} {s}", if i == *cursor { "›" } else { " " }),
-                            Style::default().fg(if i == *cursor { ACCENT } else { FG }),
-                        )
-                    })
-                    .chain([Line::from(" ↑/↓ select · Enter open · Esc close")])
-                    .collect::<Vec<_>>(),
-                ),
-                10,
             ),
             Dialog::Jobs => {
                 let mut lines = vec![];
@@ -388,8 +389,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Some(task) = &app.archive {
         let text = format!(
-            "Extracting to private temporary storage…\n{} unpacked\nEsc: cancel",
-            size(*task.bytes.lock().unwrap())
+            "Reading archive index…\n{} entries\nEsc: cancel",
+            *task.bytes.lock().unwrap()
         );
         popup(frame, app, "Open archive", text.into(), 7);
     }
@@ -403,5 +404,97 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     });
     if let Some(path) = conflict {
         popup(frame, app, "Destination exists", format!("{path}\n\no: overwrite   a: overwrite all\ns / Enter: skip   n: skip all   Esc: cancel job").into(), 9);
+    }
+    if app.viewing.is_some() {
+        popup(
+            frame,
+            app,
+            "View file",
+            "Preparing stream…\nEsc: cancel".into(),
+            6,
+        );
+    }
+    if let Some(password) = &app.password {
+        let text = format!(
+            "{}\n{}\n{}\nEnter: unlock   Esc: cancel",
+            password.request.resource,
+            if password.request.retry {
+                "Password rejected or encrypted data damaged. Try again:"
+            } else {
+                "Password:"
+            },
+            "•".repeat(password.value.chars().count())
+        );
+        popup(frame, app, "Unlock archive", text.into(), 8);
+    }
+}
+
+fn draw_menu(frame: &mut Frame, app: &mut App) {
+    let Some(state) = &mut app.menu else {
+        return;
+    };
+    let menu = &MENUS[state.category];
+    let area = frame.area();
+    let width = 34.min(area.width);
+    let height = (menu.items.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let rect = Rect::new(
+        app.menu_tabs[state.category].x.min(area.right() - width),
+        area.y + 1,
+        width,
+        height,
+    );
+    app.menu_area = rect;
+    let visible = height.saturating_sub(2).max(1) as usize;
+    if state.cursor < state.offset {
+        state.offset = state.cursor;
+    }
+    if state.cursor >= state.offset + visible {
+        state.offset = state.cursor + 1 - visible;
+    }
+    frame.render_widget(Clear, rect);
+    let surface = Color::Rgb(30, 38, 49);
+    frame.render_widget(
+        Block::bordered()
+            .border_style(Style::default().fg(Color::Rgb(70, 87, 104)))
+            .style(Style::default().bg(surface)),
+        rect,
+    );
+    for (row, (index, item)) in menu
+        .items
+        .iter()
+        .enumerate()
+        .skip(state.offset)
+        .take(visible)
+        .enumerate()
+    {
+        let checked = match item.action {
+            Action::Sort(sort) => app.panels[app.active].sort == sort,
+            Action::Hidden => app.panels[app.active].hidden,
+            _ => false,
+        };
+        let style = if index == state.cursor {
+            Style::default().fg(FG).bg(SELECTED).bold()
+        } else {
+            Style::default().fg(FG).bg(surface)
+        };
+        let label = format!("{} {}", if checked { "✓" } else { " " }, item.label);
+        let row_area = Rect::new(rect.x + 1, rect.y + 1 + row as u16, rect.width - 2, 1);
+        frame.render_widget(Paragraph::new(label).style(style), row_area);
+        let shortcut_width = item.shortcut.len() as u16;
+        if shortcut_width > 0 {
+            frame.render_widget(
+                Paragraph::new(item.shortcut).style(style.fg(if index == state.cursor {
+                    ACCENT
+                } else {
+                    DIM
+                })),
+                Rect::new(
+                    rect.right() - shortcut_width - 2,
+                    row_area.y,
+                    shortcut_width,
+                    1,
+                ),
+            );
+        }
     }
 }

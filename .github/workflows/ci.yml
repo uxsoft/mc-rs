@@ -3,6 +3,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -53,6 +54,7 @@ jobs:
         run: |
           cargo build --locked
           python3 tests/terminal_smoke.py
+          python3 tests/archive_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: mc-${{ matrix.target }}
@@ -61,4 +63,6 @@ jobs:
             mc/target/${{ matrix.target }}/release/mc.exe
             LICENSE
             README.md
+            PLAN.md
+            VFS.md
           if-no-files-found: error
