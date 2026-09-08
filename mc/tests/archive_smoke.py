@@ -13,6 +13,7 @@ import termios
 import time
 
 project = pathlib.Path(__file__).resolve().parents[1]
+binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', project / 'target/debug/mc')).resolve()
 with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
     root = pathlib.Path(tmp)
     left, right = root / 'left', root / 'right'
@@ -21,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
     pid, fd = pty.fork()
     if pid == 0:
         os.environ['TERM'] = 'xterm-256color'
-        os.execv(str(project / 'target/debug/mc'), ['mc', str(left), str(right)])
+        os.execv(str(binary), ['mc', str(left), str(right)])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
     output = bytearray()
     def pump(seconds=.2):

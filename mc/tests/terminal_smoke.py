@@ -11,7 +11,7 @@ import tempfile
 import termios
 import time
 
-binary = pathlib.Path(__file__).resolve().parents[1] / 'target/debug/mc'
+binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', pathlib.Path(__file__).resolve().parents[1] / 'target/debug/mc')).resolve()
 with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
     root = pathlib.Path(tmp)
     left, right = root / 'left', root / 'right'
