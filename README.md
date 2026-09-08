@@ -19,6 +19,8 @@ cargo run --manifest-path mc/Cargo.toml --release -- /path/to/left /path/to/righ
 
 Both directories are optional and default to the current directory. `--help` and `--version` work without a terminal. Run inside a terminal with keyboard and mouse support.
 
+Set your terminal font to a [Nerd Font](https://www.nerdfonts.com/) (use a Mono variant for consistent cell spacing) to display file type icons. Both panels show icons for directories, symlinks, archives, source code, documents, media, and other common file types, including inside archives. Unknown types use a generic file icon. Icons are always enabled; fonts without these glyphs may show empty boxes.
+
 F3 requires `cat` on PATH, including Windows. F4 uses `VISUAL`, then `EDITOR`, then `vi` on Unix or `notepad` on Windows. Editor arguments are parsed as quoted words and invoked directly; shell expressions are not evaluated. `cat` output stays visible until Enter returns to the file manager.
 
 Linux and macOS binaries dynamically link libarchive, which must also be installed on the destination machine. CI prepares native artifacts for Linux x64/ARM64, macOS ARM64, and Windows x64. **Only Linux x64 has been validated locally; the CI matrix has not yet run.**
@@ -105,7 +107,7 @@ See [PLAN.md](PLAN.md) for progress, architecture, acceptance criteria, and the 
 
 The single `.github/workflows/ci.yml` workflow builds/tests pushes to `master`, pull requests targeting `master`, and manual runs. Its **Publish to crates.io** job runs only on pushes to `master`, after all four native matrix jobs pass. GitHub releases no longer trigger publishing, and there is no separate publishing workflow or second CI matrix.
 
-CI stamps the package version as `major.minor.<github.run_number>`. For example, a checked-in version of `0.1.0` becomes `0.1.42` for workflow run 42. The major/minor values come from `mc/Cargo.toml`; its patch value is replaced. `.github/scripts/set_ci_version.py` updates the manifest and only the matching `mc-rs` lockfile entry in each runner's checkout. Tests, release binaries, artifact names, and the crate upload use the same version. The executable remains `mc`.
+CI stamps the package version as `major.minor.<github.run_number>`. For example, the checked-in version of `0.2.0` becomes `0.2.42` for workflow run 42. The major/minor values come from `mc/Cargo.toml`; its patch value is replaced. `.github/scripts/set_ci_version.py` updates the manifest and only the matching `mc-rs` lockfile entry in each runner's checkout. Tests, release binaries, artifact names, and the crate upload use the same version. The executable remains `mc`.
 
 Add a crates.io API token with publishing permission for `mc-rs` as the GitHub Actions repository secret `CARGO_REGISTRY_TOKEN`. Create/manage the token in [crates.io account settings](https://crates.io/settings/tokens); do not commit it. Then push the source changes to `master`. Keep `mc/LICENSE` synchronized with the root `LICENSE`; version stamping checks this.
 
@@ -114,6 +116,15 @@ Version changes are temporary CI changes and are not committed or pushed back. P
 GitHub reruns retain the same run number and version. If that version was already uploaded, crates.io rejects a second upload; use a new push for another version. Run numbers may have gaps from PR/manual/failed runs. See [GitHub's run-number documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/variables) and the [Cargo publishing command](https://doc.rust-lang.org/cargo/commands/cargo-publish.html).
 
 After publication, install with `cargo install mc-rs --locked` (with the build dependencies above installed). Source repository: [uxsoft/mc-rs](https://github.com/uxsoft/mc-rs).
+
+## CI efficiency
+
+- Rust downloads and compiled dependencies are cached per platform, target, compiler, and runner/native-library environment using [rust-cache](https://github.com/Swatinem/rust-cache). Restore happens before CI version stamping, keeping cache keys independent of the run number. The publisher restores the Linux x64 cache without saving another copy.
+- Windows uses a [vcpkg binary cache](https://learn.microsoft.com/en-us/vcpkg/consume/binary-caching-local) for libarchive and its dependencies, keyed by runner image, vcpkg revision, architecture, and triplet. Installation still runs so vcpkg can validate/reuse matching packages. Successful master pushes populate caches; PR/manual runs restore them without saving.
+- Formatting and version-script tests run once on Linux x64. Clippy, Rust tests, and release builds still run on all four platforms. Linux PTY tests use the already-built release binary via `MC_TEST_BINARY`; local test scripts default to `target/debug/mc`.
+- New PR commits cancel outdated native checks for that PR. Master runs retain their publishing flow. Build artifacts use compression level 1 and expire after 14 days.
+
+The first run is cold. Compiler, runner image, and dependency changes can invalidate caches. Compare subsequent Actions timings to measure savings; no speedup estimate has been measured yet.
 
 ## License and references
 

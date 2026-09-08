@@ -311,3 +311,27 @@ Deferred backlog: SFTP, FTP, and SSH-based remote access; archive creation/modif
 - Reproduced the reported core-test failure on Linux by setting TMPDIR to a symlinked directory. The test compared a canonical job resource with a raw archive filename, unlike the application's comparison of two prepared lock sets.
 - Updated the test to prepare deletion resources through `jobs::resources`, documented the `overlaps` input contract, and added Unix coverage for archive locks reached through aliased parent directories, ancestor deletion, and unrelated sibling paths.
 - Runtime locking behavior is unchanged. Validation passed: all 31 integration/contract tests with a symlinked TMPDIR, formatting, strict Clippy, and git diff checks. Native macOS rerun remains for GitHub Actions.
+
+2026-09-08 — CI caching and duplicate-work reduction:
+- Added Swatinem/rust-cache for every native job, restoring after toolchain/native dependency setup but before run-number version stamping. Cache identity includes target, compiler, runner image, and native-library environment. Only successful master pushes save Rust caches.
+- Publisher restores the Linux x64 dependency cache read-only and verifies the package for the same explicit target. It still waits for every native job and publishes only on master pushes.
+- Windows caches vcpkg binary packages, keyed by image/architecture/vcpkg revision/triplet, saving after successful dependency installation on master. vcpkg still performs installation/ABI checks on every run.
+- Formatting and Python version tests now run once on Linux x64. All platform-specific Clippy/tests/release builds remain. Linux PTY tests accept MC_TEST_BINARY and reuse the release binary instead of compiling a second host debug build.
+- Added per-PR cancellation of superseded matrix jobs, retaining master publishing runs. Artifact compression is level 1 and retention is 14 days.
+- Validation: workflow YAML and cache-before-stamping/target/publishing-gate assertions, all five version tests, release build, both PTY suites against the release binary, and diff checks passed. Cache restoration and timing gains require hosted cold/warm runs; no measured speedup is claimed.
+
+2026-09-08 — update Actions runtimes:
+- Checked upstream latest release pages and each tagged action.yml. Updated checkout to v7.0.1, setup-python to v7.0.0, cache restore/save to v6.1.0, upload-artifact to v7.0.1, and rust-cache to v2.9.2. All declare runs.using: node24. Kept dtolnay/rust-toolchain@stable, which uses composite shell steps.
+- Existing inputs remain supported; setup-python's removed pip-install input is not used, checkout's fork restrictions concern triggers we do not use, and artifact archiving remains enabled by default.
+- Preserved the pending CI cache optimizations, version stamping, native matrix, and master-only publishing gate. Workflow YAML/reference/input validation and diff checks passed; hosted execution still needs verification.
+- Sources: https://github.com/actions/checkout/releases/tag/v7.0.1 ; https://github.com/actions/setup-python/releases/tag/v7.0.0 ; https://github.com/actions/cache/releases/tag/v6.1.0 ; https://github.com/actions/upload-artifact/releases/tag/v7.0.1 ; https://github.com/Swatinem/rust-cache/releases/tag/v2.9.2 .
+
+2026-09-08 — Nerd Font file type icons:
+- Added icons to both panels for parent navigation, directories, symlinks, archives, source languages, configuration, documents, media, fonts, databases, and binaries. Unknown/extensionless files use a generic file glyph; common special filenames have dedicated mappings. Matching is ASCII case-insensitive and directory/link metadata takes precedence over extensions.
+- Classification uses existing VFS listing metadata, so archive entries share the same rendering without extra reads or extraction. Selection markers, highlighting, mouse row positions, and filenames are preserved. No dependency or configuration system was added.
+- Documented the terminal Nerd Font requirement and Mono variant spacing recommendation in README.md. Verified all 27 glyph codepoints against the upstream Nerd Fonts catalog.
+- Validation passed: formatting, strict Clippy, all 31 Rust integration/contract tests (including small/normal terminal rendering), both terminal and encrypted-archive PTY smoke suites, and diff checks. Actual glyph appearance depends on the user's terminal font.
+
+2026-09-08 — move this crate to the 0.2 release series:
+- Updated mc/Cargo.toml and its matching Cargo.lock package entry to 0.2.0. CI continues deriving the patch from GITHUB_RUN_NUMBER, now publishing 0.2.<run number>; executable remains mc. Updated the README example.
+- Validation passed: all five version-script tests, stamping a disposable copy of the actual manifests to 0.2.42, locked offline Cargo metadata, and diff checks. No crate was published during this change.

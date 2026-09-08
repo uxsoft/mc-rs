@@ -22,21 +22,23 @@ jobs:
           - os: windows-2025
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    # New PR commits supersede old checks; master pushes keep their publish runs.
+    concurrency:
+      group: native-${{ matrix.target }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     defaults:
       run:
         working-directory: mc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.12'
       - name: Test CI version stamping
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: python -B -m unittest discover -s ../.github/scripts -p "test_*.py"
-      - name: Set CI version
-        id: version
-        run: python ../.github/scripts/set_ci_version.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -49,24 +51,62 @@ jobs:
         run: |
           brew install libarchive pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "$GITHUB_ENV"
-      - name: Windows archive dependencies
+      - name: Configure Windows dependency cache
         if: runner.os == 'Windows'
+        id: vcpkg
         shell: pwsh
         run: |
-          vcpkg install libarchive:x64-windows-static-md
+          $cacheDir = Join-Path $env:RUNNER_TEMP "vcpkg-binaries"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+          "cache-dir=$cacheDir" >> $env:GITHUB_OUTPUT
+          $revision = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Cannot identify the vcpkg revision" }
+          "revision=$revision" >> $env:GITHUB_OUTPUT
+          "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
+          "VCPKG_BINARY_SOURCES=clear;files,$cacheDir,readwrite" >> $env:GITHUB_ENV
           "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+      - name: Restore Windows dependency binaries
+        if: runner.os == 'Windows'
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ${{ steps.vcpkg.outputs.cache-dir }}
+          key: vcpkg-libarchive-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.revision }}-x64-windows-static-md
+      - name: Windows archive dependencies
+        if: runner.os == 'Windows'
+        run: vcpkg install libarchive:x64-windows-static-md
+      - name: Save Windows dependency binaries
+        if: runner.os == 'Windows' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ steps.vcpkg.outputs.cache-dir }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+      # Hash the checked-in manifests, not the version stamped for this run.
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: mc -> target
+          shared-key: native-${{ matrix.os }}-${{ matrix.target }}
+          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST VCPKG PKG_CONFIG ImageVersion"
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      - name: Set CI version
+        id: version
+        run: python ../.github/scripts/set_ci_version.py
       - run: cargo fmt --check
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
       - run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo test --locked --target ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Linux terminal smoke test
         if: runner.os == 'Linux'
+        env:
+          MC_TEST_BINARY: ${{ github.workspace }}/mc/target/${{ matrix.target }}/release/mc
         run: |
-          cargo build --locked
           python3 tests/terminal_smoke.py
           python3 tests/archive_smoke.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: mc-${{ steps.version.outputs.version }}-${{ matrix.target }}
           path: |
@@ -77,6 +117,8 @@ jobs:
             PLAN.md
             VFS.md
           if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
 
   publish:
     name: Publish to crates.io
@@ -90,17 +132,25 @@ jobs:
       run:
         working-directory: mc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.12'
-      - name: Set CI version
-        run: python ../.github/scripts/set_ci_version.py
       - uses: dtolnay/rust-toolchain@stable
       - name: Install archive dependencies
         run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
+      - name: Reuse Linux Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: mc -> target
+          shared-key: native-ubuntu-24.04-x86_64-unknown-linux-gnu
+          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST VCPKG PKG_CONFIG ImageVersion"
+          cache-bin: false
+          save-if: false
+      - name: Set CI version
+        run: python ../.github/scripts/set_ci_version.py
       # cargo publish verifies the package before uploading. Only the two version
       # files are changed in this clean checkout; no version commit is pushed back.
       - name: Publish verified crate
@@ -111,4 +161,4 @@ jobs:
             echo "::error::Add the CARGO_REGISTRY_TOKEN repository secret with permission to publish mc-rs."
             exit 1
           fi
-          cargo publish --locked --allow-dirty --registry crates-io
+          cargo publish --locked --allow-dirty --registry crates-io --target x86_64-unknown-linux-gnu

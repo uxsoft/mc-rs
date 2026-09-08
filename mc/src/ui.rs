@@ -4,6 +4,7 @@ use crate::{
 };
 use ratatui::{prelude::*, widgets::*};
 use std::sync::atomic::Ordering;
+mod icons;
 const BG: Color = Color::Rgb(19, 23, 31);
 const FG: Color = Color::Rgb(210, 219, 230);
 const DIM: Color = Color::Rgb(123, 138, 156);
@@ -151,20 +152,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let mut table_rows = vec![];
         for index in p.offset..(p.offset + visible).min(p.entries.len() + 1) {
             let (name, bytes, date, selected, directory) = if index == 0 {
-                ("/..".into(), "UP".into(), String::new(), false, true)
+                (
+                    format!("{} ..", icons::PARENT),
+                    "UP".into(),
+                    String::new(),
+                    false,
+                    true,
+                )
             } else {
                 let e = &p.entries[index - 1];
                 let date: chrono::DateTime<chrono::Local> = e.modified.into();
                 (
                     format!(
-                        "{}{}",
-                        if e.link {
-                            "@"
-                        } else if e.directory {
-                            "/"
-                        } else {
-                            " "
-                        },
+                        "{} {}",
+                        icons::for_entry(&e.name, e.directory, e.link),
                         e.name
                     ),
                     if e.directory && !e.link {
