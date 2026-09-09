@@ -38,8 +38,9 @@ pub enum Dialog {
     Jobs,
     Quit,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Purpose {
+    Rename(VfsPath),
     Copy,
     Move,
     Mkdir,
@@ -99,6 +100,8 @@ pub struct App {
     pub width: u16,
     pub quit: bool,
     pub quick: String,
+    pub quick_found: bool,
+    quick_typed: Option<Instant>,
     last_click: Option<(Instant, usize, usize)>,
     escape: Option<Instant>,
     completed: usize,
@@ -137,6 +140,8 @@ impl App {
             width: 0,
             quit: false,
             quick: String::new(),
+            quick_found: true,
+            quick_typed: None,
             last_click: None,
             escape: None,
             completed: 0,
@@ -180,6 +185,7 @@ impl App {
         Ok(())
     }
     pub fn poll(&mut self) {
+        self.expire_quick();
         if self.connecting.is_none()
             && let Some((value, panel)) = self.pending_connections.pop_front()
         {
@@ -224,17 +230,43 @@ impl App {
             && self.archive.is_none()
             && self.viewing.is_none()
             && self.search.is_none()
-            && self.menu.is_none();
+            && self.menu.is_none()
+            && self.quick.is_empty();
+        let entry_count = self.panel().entries.len();
         for p in &mut self.panels {
             if auto_refresh {
                 p.auto_refresh();
             }
             p.poll();
         }
+        if !self.quick.is_empty() && self.panel().entries.len() != entry_count {
+            self.quick_match(false);
+        }
+        let mut rename_error = None;
         for job in &mut self.jobs {
-            if job.progress.lock().unwrap().done {
+            let progress = job.progress.lock().unwrap();
+            if progress.done {
+                if job.operation == Operation::Rename && !job.resources.is_empty() {
+                    if let Some(error) = &progress.error {
+                        rename_error = Some(error.clone());
+                    } else if let Some(source) = job.sources.first() {
+                        for panel in &mut self.panels {
+                            if panel.current().is_some_and(|e| e.path == *source) {
+                                panel.reveal = Some(job.destination.clone());
+                            }
+                            if panel.selected.remove(source) {
+                                panel.selected.insert(job.destination.clone());
+                            }
+                        }
+                    }
+                }
                 job.resources.clear();
             }
+        }
+        if let Some(error) = rename_error
+            && self.dialog.is_none()
+        {
+            self.message("Rename", error);
         }
         let done = self
             .jobs
@@ -276,6 +308,9 @@ impl App {
         });
     }
     fn start(&mut self, op: Operation, destination: VfsPath) {
+        self.start_sources(op, self.panel().sources(), destination);
+    }
+    fn start_sources(&mut self, op: Operation, sources: Vec<VfsPath>, destination: VfsPath) {
         if !self.panel().path.fs.capabilities().write && op != Operation::Copy {
             self.message(
                 "Read-only archive",
@@ -294,7 +329,6 @@ impl App {
             self.message("Trash unavailable", "This filesystem has no trash. Use F8 and explicitly choose Permanently delete to remove remote files.");
             return;
         }
-        let sources = self.panel().sources();
         if sources.is_empty() && op != Operation::Mkdir {
             return;
         }
@@ -405,12 +439,21 @@ impl App {
     }
     fn function(&mut self, n: u8, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         match n {
-            1 => self.message("Keyboard help", "Tab  Switch panel\n↑ ↓ Home End PgUp PgDn  Navigate\nEnter  Open directory/archive or cat file\nSpace / Insert / Ctrl+T  Select and advance; size directories\n+ / - / *  Select / unselect / invert\nAlt+.  Hidden files    Ctrl+R  Refresh\nAlt+?  Recursive filename search\nCtrl+S  Quick search (then type)\nCtrl+U  Swap panels    Alt+O  Other panel to current directory\nF3 cat   F4 editor   F5 copy   F6 move\nF7 mkdir   F8 delete   F9 menu   F10 quit\nEsc then digit is an alternative to F1–F10.\nRight-click selects; double-click opens.\nShell integration and F2 user menus are omitted."),
+            1 => self.message("Keyboard help", "Tab  Switch panel\n↑ ↓ Home End PgUp PgDn  Navigate\nEnter  Open directory/archive or cat file\nSpace / Insert / Ctrl+T  Select and advance; size directories\n+ / - / *  Select / unselect / invert\nAlt+.  Hidden files    Ctrl+R  Refresh\nAlt+?  Recursive filename search\nType  Jump to filename (1.5s pause starts over)\nCtrl+S / Alt+S  Quick search / next match\nCtrl+U  Swap panels    Alt+O  Other panel to current directory\nF2 rename   F3 cat   F4 editor   F5 copy   F6 move\nF7 mkdir   F8 delete   F9 menu   F10 quit\nEsc then digit is an alternative to F1–F10.\nRight-click selects; double-click opens.\nShell integration and F2 user menus are omitted."),
+            2 => {
+                if !self.panel().loading && let Some(entry) = self.panel().current().cloned() {
+                    if entry.path.fs.capabilities().write {
+                        self.input(Purpose::Rename(entry.path), "Rename in place", entry.name);
+                    } else {
+                        self.message("Rename", "This filesystem is read-only.");
+                    }
+                }
+            }
             3 => self.view(false, terminal)?, 4 => self.view(true, terminal)?,
             5 | 6 => { if !self.panel().sources().is_empty() { self.input(if n == 5 { Purpose::Copy } else { Purpose::Move }, if n == 5 { "Copy to" } else { "Move to" }, self.panels[1-self.active].path.display().to_string()); } }
             7 => self.input(Purpose::Mkdir, "Create directory", String::new()),
             8 => { if !self.panel().sources().is_empty() { self.dialog = Some(Dialog::Delete { permanent: false }); } }
-            9 => { self.quick.clear(); self.menu = Some(menu::State::default()); },
+            9 => { self.clear_quick(); self.menu = Some(menu::State::default()); },
             10 => { if self.busy() { self.dialog = Some(Dialog::Quit); } else { self.quit = true; } }, _ => {}
         }
         Ok(())
@@ -505,40 +548,16 @@ impl App {
                 k.modifiers |= M::ALT;
             }
         }
+        self.expire_quick();
         if k.code == K::Esc {
-            self.escape = Some(Instant::now());
-            self.quick.clear();
+            if self.quick.is_empty() {
+                self.escape = Some(Instant::now());
+            }
+            self.clear_quick();
             return Ok(());
         }
-        if !self.quick.is_empty() {
-            if k.code == K::Char('s') && k.modifiers.intersects(M::CONTROL | M::ALT) {
-                let query = format!("{}*", self.quick.trim_start_matches('\0').to_lowercase());
-                let len = self.panel().entries.len();
-                let cursor = self.panel().cursor;
-                if len > 0 {
-                    for step in 0..len {
-                        let i = (cursor + step) % len;
-                        if wildcard(&query, &self.panel().entries[i].name.to_lowercase()) {
-                            self.panel_mut().cursor = i + 1;
-                            break;
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            match k.code {
-                K::Char(c) if k.modifiers.is_empty() || k.modifiers == M::SHIFT => {
-                    self.quick.push(c);
-                    self.quick_match();
-                    return Ok(());
-                }
-                K::Backspace => {
-                    self.quick.pop();
-                    self.quick_match();
-                    return Ok(());
-                }
-                _ => self.quick.clear(),
-            }
+        if self.quick_key(k) {
+            return Ok(());
         }
         match (k.code, k.modifiers) {
             (K::F(n), _) => self.function(n, terminal)?,
@@ -622,25 +641,99 @@ impl App {
                 self.panels[1 - self.active].navigate(path);
                 self.panel_mut().step(1);
             }
-            (K::Char('s'), M::CONTROL) | (K::Char('s'), M::ALT) => {
-                self.quick = "\u{0}".into();
-                self.status = "Quick search: type a filename prefix; Esc clears".into();
-            }
             _ => {}
         }
         Ok(())
     }
-    fn quick_match(&mut self) {
-        let query = self.quick.trim_start_matches('\0').to_lowercase();
-        if let Some(i) = self
-            .panel()
-            .entries
-            .iter()
-            .position(|e| wildcard(&format!("{query}*"), &e.name.to_lowercase()))
+    fn clear_quick(&mut self) {
+        self.quick.clear();
+        self.quick_typed = None;
+        self.quick_found = true;
+    }
+    fn expire_quick(&mut self) {
+        if self
+            .quick_typed
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(1500))
         {
+            self.clear_quick();
+        }
+    }
+    /// Returns true only when quick navigation consumes the key. Action keys
+    /// clear the query and continue through the normal MC shortcut dispatch.
+    fn quick_key(&mut self, k: KeyEvent) -> bool {
+        self.expire_quick();
+        if k.code == K::Char('s') && matches!(k.modifiers, M::CONTROL | M::ALT) {
+            if self.quick.is_empty() {
+                self.quick.push('\0'); // Explicit MC search stays active until dismissed.
+                self.quick_typed = None;
+                self.quick_found = true;
+            } else {
+                if !self.quick.starts_with('\0') {
+                    self.quick.insert(0, '\0');
+                }
+                self.quick_typed = None;
+                self.quick_match(true);
+            }
+            return true;
+        }
+        let explicit = self.quick.starts_with('\0');
+        match k.code {
+            K::Char(c)
+                if matches!(k.modifiers, M::NONE | M::SHIFT)
+                    && !c.is_control()
+                    && (explicit || !matches!(c, ' ' | '+' | '-' | '*' | '\\')) =>
+            {
+                self.quick.push(c);
+                if !explicit {
+                    self.quick_typed = Some(Instant::now());
+                }
+                self.quick_match(false);
+                true
+            }
+            K::Backspace if !self.quick.is_empty() && k.modifiers.is_empty() => {
+                if self.quick != "\0" {
+                    self.quick.pop();
+                }
+                if !explicit {
+                    self.quick_typed = Some(Instant::now());
+                }
+                self.quick_match(false);
+                true
+            }
+            _ => {
+                self.clear_quick();
+                false
+            }
+        }
+    }
+    fn quick_match(&mut self, next: bool) {
+        let query = self.quick.trim_start_matches('\0').to_lowercase();
+        if query.is_empty() {
+            self.quick_found = true;
+            return;
+        }
+        let explicit = self.quick.starts_with('\0');
+        let pattern = format!("{query}*");
+        let p = self.panel();
+        let len = p.entries.len();
+        // Cursor includes the parent row, so its value is the next entry index.
+        let start = if next {
+            p.cursor
+        } else {
+            p.cursor.saturating_sub(1)
+        };
+        let found = (0..len).map(|step| (start + step) % len).find(|&i| {
+            let name = p.entries[i].name.to_lowercase();
+            if explicit {
+                wildcard(&pattern, &name)
+            } else {
+                name.starts_with(&query)
+            }
+        });
+        self.quick_found = found.is_some();
+        if let Some(i) = found {
             self.panel_mut().cursor = i + 1;
         }
-        self.status = format!("Quick search: {query}");
     }
     fn menu_key(&mut self, key: KeyEvent, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         let state = self.menu.as_mut().unwrap();
@@ -728,7 +821,7 @@ impl App {
                 ..
             } => {
                 if k.code == K::Enter {
-                    self.submit(*purpose, value.clone());
+                    self.submit(purpose.clone(), value.clone());
                     return Ok(());
                 }
                 edit_input(value, cursor, k);
@@ -813,6 +906,32 @@ impl App {
         Ok(())
     }
     fn submit(&mut self, purpose: Purpose, value: String) {
+        if let Purpose::Rename(source) = purpose {
+            let name = std::path::Path::new(&value);
+            let mut components = name.components();
+            let valid = !value.is_empty()
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() || c == '/' || c == '\\')
+                && matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none();
+            if !valid {
+                self.message(
+                    "Rename",
+                    "Enter one filename, without a path, control characters, . or ..",
+                );
+                return;
+            }
+            if source.file_name() == Some(name.as_os_str()) {
+                return;
+            }
+            if let Some(parent) = source.path.parent() {
+                let destination = VfsPath::new(source.fs.clone(), parent.join(name));
+                self.start_sources(Operation::Rename, vec![source], destination);
+            }
+            return;
+        }
+
         if matches!(purpose, Purpose::Goto | Purpose::Copy | Purpose::Move)
             && remote::is_url(&value)
         {
@@ -859,6 +978,7 @@ impl App {
             }
         };
         match purpose {
+            Purpose::Rename(_) => unreachable!(),
             Purpose::Copy => self.start(Operation::Copy, path),
             Purpose::Move => self.start(Operation::Move, path),
             Purpose::Mkdir => {
@@ -897,6 +1017,7 @@ impl App {
         self.connecting.as_mut().unwrap().panel = panel;
     }
     fn resolve_path(&mut self, value: String, existing: Option<VfsPath>, purpose: Purpose) {
+        let check_directory = matches!(purpose, Purpose::Goto);
         let (tx, receiver) = mpsc::channel();
         let ctx = Context {
             auth: Some(self.auth_tx.clone()),
@@ -910,7 +1031,7 @@ impl App {
                 } else {
                     remote::connect_path(&value, &ctx)?
                 };
-                if matches!(purpose, Purpose::Goto) {
+                if check_directory {
                     anyhow::ensure!(
                         path.metadata(true, &ctx)?.kind == Kind::Directory,
                         "Not an accessible directory"
@@ -1024,6 +1145,12 @@ impl App {
     ) -> Result<()> {
         if self.password.is_some() || self.viewing.is_some() || self.connecting.is_some() {
             return Ok(());
+        }
+        if matches!(
+            m.kind,
+            MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            self.clear_quick();
         }
         let click = m.kind == MouseEventKind::Down(MouseButton::Left);
         let area = self.dialog_area;
@@ -1175,7 +1302,7 @@ impl App {
                 .iter()
                 .position(|r| r.contains((m.column, m.row).into()))
             {
-                self.quick.clear();
+                self.clear_quick();
                 self.menu = Some(menu::State {
                     category,
                     ..Default::default()
@@ -1302,5 +1429,283 @@ pub fn edit_input(value: &mut String, cursor: &mut usize, key: KeyEvent) {
             *cursor += c.len_utf8();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod quick_navigation_tests {
+    use super::*;
+    use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
+
+    fn terminal() -> ratatui::DefaultTerminal {
+        Terminal::with_options(
+            CrosstermBackend::new(std::io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 25)),
+            },
+        )
+        .unwrap()
+    }
+    fn fixture() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "Alpha.txt",
+            "Alpine.txt",
+            "beta.txt",
+            "a?literal",
+            "Éclair.txt",
+        ] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("Zoo")).unwrap();
+        let mut app = App::new(dir.path().to_owned(), dir.path().to_owned());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.panels.iter().any(|p| p.loading) {
+            app.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        (dir, app)
+    }
+    fn type_text(app: &mut App, terminal: &mut ratatui::DefaultTerminal, text: &str) {
+        for c in text.chars() {
+            app.key(KeyEvent::new(K::Char(c), M::NONE), terminal)
+                .unwrap();
+        }
+    }
+    fn name(app: &App) -> &str {
+        &app.panel().current().unwrap().name
+    }
+
+    #[test]
+    fn typing_matches_names_cycles_wraps_and_edits_unicode() {
+        let (_dir, mut app) = fixture();
+        let mut terminal = terminal();
+        type_text(&mut app, &mut terminal, "AL");
+        assert_eq!(name(&app), "Alpha.txt");
+        for expected in ["Alpine.txt", "Alpha.txt"] {
+            app.key(KeyEvent::new(K::Char('s'), M::CONTROL), &mut terminal)
+                .unwrap();
+            assert_eq!(name(&app), expected);
+        }
+        type_text(&mut app, &mut terminal, "x");
+        assert!(!app.quick_found);
+        assert_eq!(name(&app), "Alpha.txt");
+        app.key(KeyEvent::new(K::Backspace, M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.quick_found);
+        app.key(KeyEvent::new(K::Esc, M::NONE), &mut terminal)
+            .unwrap();
+        type_text(&mut app, &mut terminal, "é");
+        assert_eq!(name(&app), "Éclair.txt");
+        app.key(KeyEvent::new(K::Backspace, M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.quick.is_empty());
+        type_text(&mut app, &mut terminal, "a?");
+        assert_eq!(name(&app), "a?literal"); // Auto navigation treats punctuation literally.
+        app.clear_quick();
+        type_text(&mut app, &mut terminal, "z");
+        assert_eq!(name(&app), "Zoo");
+    }
+
+    #[test]
+    fn timeout_shortcuts_panels_and_escape_keep_their_roles() {
+        let (_dir, mut app) = fixture();
+        let mut terminal = terminal();
+        type_text(&mut app, &mut terminal, "al");
+        app.quick_typed = Some(Instant::now() - Duration::from_secs(2));
+        type_text(&mut app, &mut terminal, "b");
+        assert_eq!(app.quick, "b");
+        assert_eq!(name(&app), "beta.txt");
+        let path = app.panel().current().unwrap().path.clone();
+        app.key(KeyEvent::new(K::Char(' '), M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.quick.is_empty());
+        assert!(app.panel().selected.contains(&path));
+        type_text(&mut app, &mut terminal, "al");
+        app.key(KeyEvent::new(K::Tab, M::NONE), &mut terminal)
+            .unwrap();
+        assert_eq!(app.active, 1);
+        assert!(app.quick.is_empty());
+        type_text(&mut app, &mut terminal, "z");
+        app.key(KeyEvent::new(K::Esc, M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.escape.is_none()); // Next ordinary character must not become Alt+key.
+        type_text(&mut app, &mut terminal, "b");
+        assert_eq!(name(&app), "beta.txt");
+        app.key(KeyEvent::new(K::Char('+'), M::SHIFT), &mut terminal)
+            .unwrap();
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Input {
+                purpose: Purpose::Select,
+                ..
+            })
+        ));
+        assert!(app.quick.is_empty());
+        type_text(&mut app, &mut terminal, "b");
+        assert!(app.quick.is_empty()); // Dialog text is never intercepted.
+        app.dialog = None;
+        app.key(KeyEvent::new(K::Esc, M::NONE), &mut terminal)
+            .unwrap();
+        app.key(KeyEvent::new(K::Char('9'), M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.menu.is_some()); // Esc+digit MC function-key alternative remains.
+    }
+
+    #[test]
+    fn explicit_search_stays_active_and_empty_panels_are_safe() {
+        let (_dir, mut app) = fixture();
+        let mut terminal = terminal();
+        app.key(KeyEvent::new(K::Char('s'), M::CONTROL), &mut terminal)
+            .unwrap();
+        type_text(&mut app, &mut terminal, "*txt");
+        assert!(app.quick_typed.is_none());
+        assert!(app.quick_found);
+        app.expire_quick();
+        assert!(!app.quick.is_empty());
+        app.panels[app.active].entries.clear();
+        app.key(KeyEvent::new(K::Char('s'), M::ALT), &mut terminal)
+            .unwrap();
+        assert!(!app.quick_found);
+        app.clear_quick();
+        type_text(&mut app, &mut terminal, "missing");
+        assert!(!app.quick_found);
+    }
+
+    #[test]
+    fn query_renders_in_existing_border_and_scrolls_to_match() {
+        let (_dir, mut app) = fixture();
+        let mut keys = terminal();
+        type_text(&mut app, &mut keys, "é");
+        let mut screen = Terminal::new(ratatui::backend::TestBackend::new(100, 10)).unwrap();
+        screen.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(app.panel().offset > 0);
+        let text: String = screen
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Find: é"));
+        assert!(text.contains("Éclair.txt"));
+        type_text(&mut app, &mut keys, "zz");
+        screen.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text: String = screen
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("No match"));
+    }
+    fn finish_jobs(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll();
+            if !app.busy() && app.panels.iter().all(|p| !p.loading) {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+    #[test]
+    fn f2_renames_only_highlighted_item_and_reveals_new_name() {
+        let (dir, mut app) = fixture();
+        let mut terminal = terminal();
+        let other = app.panel().path.join("beta.txt");
+        app.panel_mut().selected.insert(other.clone());
+        type_text(&mut app, &mut terminal, "alp");
+        app.key(KeyEvent::new(K::F(2), M::NONE), &mut terminal)
+            .unwrap();
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Input { value, purpose: Purpose::Rename(_), .. }) if value == "Alpha.txt")
+        );
+        app.key(KeyEvent::new(K::Char('u'), M::CONTROL), &mut terminal)
+            .unwrap();
+        type_text(&mut app, &mut terminal, "renamed é.txt");
+        app.key(KeyEvent::new(K::Enter, M::NONE), &mut terminal)
+            .unwrap();
+        finish_jobs(&mut app);
+        assert!(
+            app.jobs
+                .last()
+                .unwrap()
+                .progress
+                .lock()
+                .unwrap()
+                .error
+                .is_none()
+        );
+        assert!(!dir.path().join("Alpha.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("renamed é.txt")).unwrap(),
+            "Alpha.txt"
+        );
+        assert_eq!(name(&app), "renamed é.txt");
+        assert!(app.panel().selected.contains(&other));
+        assert!(dir.path().join("beta.txt").exists());
+    }
+    #[test]
+    fn rename_rejects_paths_existing_names_and_parent_and_supports_directories() {
+        let (dir, mut app) = fixture();
+        let mut terminal = terminal();
+        app.key(KeyEvent::new(K::F(2), M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.dialog.is_none()); // Parent row cannot be renamed.
+        let source = app.panel().path.join("Alpha.txt");
+        for invalid in ["", ".", "..", "../escape", "a/b", "a\\b", "a\0b"] {
+            app.submit(Purpose::Rename(source.clone()), invalid.into());
+            assert!(matches!(app.dialog, Some(Dialog::Message { .. })));
+            assert!(app.jobs.is_empty());
+            app.dialog = None;
+        }
+        app.submit(Purpose::Rename(source.clone()), "Alpha.txt".into());
+        assert!(app.jobs.is_empty());
+        for existing in ["beta.txt", "Zoo"] {
+            app.submit(Purpose::Rename(source.clone()), existing.into());
+            finish_jobs(&mut app);
+            assert!(
+                app.jobs
+                    .last()
+                    .unwrap()
+                    .progress
+                    .lock()
+                    .unwrap()
+                    .error
+                    .is_some()
+            );
+            assert!(source.local_path().unwrap().exists());
+            assert!(!dir.path().join("Zoo/Alpha.txt").exists());
+            app.dialog = None;
+        }
+        let folder = app.panel().path.join("Zoo");
+        std::fs::write(dir.path().join("Zoo/child"), "kept").unwrap();
+        app.submit(Purpose::Rename(folder), "renamed directory".into());
+        finish_jobs(&mut app);
+        assert!(
+            app.jobs
+                .last()
+                .unwrap()
+                .progress
+                .lock()
+                .unwrap()
+                .error
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("renamed directory/child")).unwrap(),
+            "kept"
+        );
+        type_text(&mut app, &mut terminal, "beta");
+        app.key(KeyEvent::new(K::F(2), M::NONE), &mut terminal)
+            .unwrap();
+        app.key(KeyEvent::new(K::Esc, M::NONE), &mut terminal)
+            .unwrap();
+        assert!(app.dialog.is_none());
+        assert!(dir.path().join("beta.txt").exists());
     }
 }

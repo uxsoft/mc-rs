@@ -217,6 +217,31 @@ fn rename_noreplace(a: &Path, b: &Path) -> Result<()> {
         rustix::fs::RenameFlags::NOREPLACE,
     )?;
     #[cfg(windows)]
-    fs::rename(a, b)?;
+    {
+        use anyhow::Context as _;
+        use std::os::windows::ffi::OsStrExt;
+        fn wide(path: &Path) -> Result<Vec<u16>> {
+            // Canonicalize only the parent: retain symlink identity and get the
+            // Windows extended-length prefix without requiring the target to exist.
+            let absolute = std::path::absolute(path)?;
+            let path = fs::canonicalize(absolute.parent().context("No parent")?)?
+                .join(absolute.file_name().context("No filename")?);
+            let mut value: Vec<_> = path.as_os_str().encode_wide().collect();
+            anyhow::ensure!(!value.contains(&0), "Path contains a NUL character");
+            value.push(0);
+            Ok(value)
+        }
+        let from = wide(a)?;
+        let to = wide(b)?;
+        // std::fs::rename replaces existing files on Windows. Flags=0 omits
+        // MOVEFILE_REPLACE_EXISTING, enforcing no-replace in the OS call itself.
+        // SAFETY: both pointers reference live, NUL-terminated UTF-16 strings.
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
     Ok(())
 }

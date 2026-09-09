@@ -28,6 +28,8 @@ This is an independent Rust implementation of those architectural ideas, not a l
 
 Local operations live in `vfs/local.rs`. Panels, size scans, recursive search, and jobs use the common interface. Same-provider moves attempt rename before streamed copy/remove fallback. Job locks include canonical source/target locations and underlying archive resources. A provider reporting read-only cannot be a move/delete source or copy destination.
 
+Explicit F2 renames use a single-source `Rename` job and `FileSystem::rename_in_place`, with an exact same-directory target and destination locks. Unlike the move optimization, this operation propagates errors without a copy/remove fallback. Local and SFTP providers reuse their no-replace rename; FTP checks for an existing target then uses RNFR/RNTO (a concurrent creator remains a protocol limitation). The SSH helper uses Linux `renameat2(RENAME_NOREPLACE)` or macOS `renamex_np(RENAME_EXCL)` and refuses unsupported servers/filesystems. See the [Linux rename documentation](https://man7.org/linux/man-pages/man2/renameat2.2.html) and [Apple exclusive rename documentation](https://developer.apple.com/documentation/foundation/urlresourcevalues/volumesupportsexclusiverenaming). An uncertain remote reply requires inspecting both names before manual retry.
+
 ## Archive sessions
 
 `archives.rs` is a read-only provider with an immutable path-to-entry map and parent-to-children index. Implicit directory entries are synthesized. Entries hold metadata and original decoder member identifiers, never temporary OS paths. The root's parent resolves to the source archive's containing VFS directory.

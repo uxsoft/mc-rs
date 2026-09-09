@@ -48,12 +48,14 @@ Linux and macOS binaries dynamically link libarchive, which must also be install
 
 - Browse independent panels, sort by name/size/date through F9, toggle hidden files, and select multiple items with Space, Insert, or right-click. Selected directories are sized recursively in the background; their size appears in the Size column, and the selection total appears in each panel’s bottom border. Hidden files are included; symlinks are counted by link length without following their targets. Unreadable entries mark totals as partial. Ctrl+R refreshes cached sizes.
 - Copy and move into the opposite panel, or enter a new destination/name. Same-filesystem moves use an atomic no-replace rename where possible. Cross-filesystem moves and directory merges copy before removing source data.
+- F2 renames the highlighted file or directory in place, regardless of other selections. The dialog starts with its current name; edit it, use Ctrl+U to clear, then Enter to confirm or Escape to cancel. Enter a single name, not a path. Existing targets are refused, and successful renames keep the cursor on the new name. Read-only archive entries cannot be renamed.
 - Jobs run in the background. Unrelated jobs can run together; jobs with overlapping source/destination paths are rejected until the running job finishes. F9 → File → Background jobs lists every job. Use arrows or the mouse to select one, `c` to cancel it, and `r` to explicitly retry a failed/cancelled job. The selected transfer shows a per-file progress bar, average speed, and estimated remaining time for that file. Retry opens fresh SSH sessions and restarts remaining top-level sources; completed top-level sources are skipped and conflicts ask again. It does not resume partial bytes or automatically replay mutations.
 - Panels show listing batches as they arrive. Idle panels refresh every 3 seconds locally and 15 seconds remotely; automatic refresh pauses during jobs, modal work, and selection. Ctrl+R always requests a refresh.
 - Copies preserve file/directory modification times locally and over SSH/SFTP, and ordinary Unix permission bits when the client is Unix. FTP preserves regular-file modification times when the server advertises MFMT; FTP directory times and permissions are not portable and are not preserved. Windows clients retain local native permissions but do not translate Unix modes. Archive headers supply stored modification times and Unix modes where available; ZIP/RAR DOS times use the client’s local timezone and format precision. Gzip uses its header time or the source time. Ownership, ACLs, extended attributes, special permission bits, and symlink timestamps are not copied.
 - An existing file prompts for overwrite, skip, overwrite all, or skip all. Enter defaults to skip. Directory copies merge into existing plain directories; incompatible file/directory collisions stop with an error.
 - F8 defaults to the operating system's trash. Choose permanent deletion explicitly with Tab or the mouse. Trash failures never fall back to permanent deletion.
 - Recursive filename search matches a case-insensitive substring, reports unreadable paths, and stops at 100,000 results. Enter navigates to and highlights the selected result. Directory symlinks are not traversed.
+- Type in either pane to jump to a filename prefix, ignoring case. The query appears in the pane's bottom border; no match leaves the cursor where it was. Backspace edits the query, and a 1.5-second pause starts a new query. Escape clears it; navigation, mouse actions, and file-operation shortcuts clear it and perform their usual action. Space and `+`/`-`/`*`/`\` remain selection shortcuts. Use Ctrl+S or Alt+S for the existing persistent quick search, including spaces and wildcard patterns; press it again to cycle through matches. Browsing searches only the listed names, including directories and archive/remote entries, without additional filesystem reads.
 
 ## Keys and mouse
 
@@ -67,7 +69,8 @@ Linux and macOS binaries dynamically link libarchive, which must also be install
 | Enter | Enter directory/archive; view regular file with cat |
 | Space, Insert, Ctrl+T | Toggle file/directory selection and advance |
 | `+`, `-` or `\`, `*` | Select by wildcard, unselect by wildcard, invert file selection |
-| Ctrl+S, Alt+S | Quick filename search; Esc clears |
+| Type a filename | Jump to a matching prefix; resets after 1.5 seconds |
+| Ctrl+S, Alt+S | Persistent quick filename search / next match; Esc clears |
 | Alt+? | Recursive filename search |
 | Alt+C | Go to directory |
 | Alt+. | Toggle hidden files |
@@ -77,6 +80,7 @@ Linux and macOS binaries dynamically link libarchive, which must also be install
 | Ctrl+U | Swap panel contents |
 | Ctrl+R, Ctrl+L | Reload directory, repaint screen |
 | F1 | Help |
+| F2 | Rename highlighted item in place |
 | F3 / F4 | External cat / editor |
 | F5 / F6 / F7 / F8 | Copy / move / mkdir / delete |
 | F9 / F10 | Menu / quit |
@@ -86,6 +90,8 @@ Esc followed by a digit substitutes for a function key (`0` means F10). Esc foll
 Click to focus a panel and position the cursor; right-click toggles selection; double-click opens; the wheel scrolls. The persistent File / View / Go / Help bar opens dropdowns beneath each label. F9 opens File; Left/Right or Tab switch menus, Up/Down select actions, Enter activates, and Esc/F9 dismisses. Mouse hover switches open menus and highlights actions; clicking outside dismisses them. Function-key labels and menu choices are clickable. In deletion dialogs, click the deletion mode, then confirm.
 
 ## Archives
+
+Press Enter to browse ZIP-based application files just like ZIP archives: JAR/WAR/EAR; Word DOCX/DOCM/DOTX/DOTM; Excel XLSX/XLSM/XLSB/XLTX/XLTM/XLAM; PowerPoint PPTX/PPTM/POTX/POTM/PPSX/PPSM/PPAM/SLDX/SLDM; Visio VSDX/VSDM/VSSX/VSSM/VSTX/VSTM; and Office THMX themes. Extensions are case-insensitive. F3 views a member and F5 copies it out, including nested archives and remote sources. These files retain their application-specific icons where available. Legacy DOC/XLS/PPT files are not ZIP containers and are not browsable archives. Format references: [JAR](https://docs.oracle.com/javase/8/docs/technotes/guides/jar/index.html) and [Office formats](https://learn.microsoft.com/en-us/office/compatibility/office-file-format-reference).
 
 Enter opens ZIP, RAR, tar, 7z, `.tar.gz`, `.tgz`, or `.gz` in a read-only panel. F5 copies entries to a local destination; F3 views a file via `cat`. Parent navigation at the archive root returns to the containing directory.
 
@@ -119,6 +125,7 @@ mc 'ssh://alice@example.com:2222/home/alice' 'ftp://user@files.example.com/publi
 - Paths are absolute on the server. Spaces and URL delimiters can be percent-encoded. UTF-8 names are supported; control characters and backslashes are rejected. Within a remote panel, relative and absolute paths stay on that server. **Go → Local directory** returns to the process's local working directory; `file:///absolute/path` also opens a local location.
 - Browse, select/size directories, search filenames, F3 stream to `cat`, and copy/move/mkdir/permanently delete using the normal keys and background jobs. Remote files have no trash: F8 retains the trash default and explains that permanent deletion must be chosen explicitly. Remote editing and creating remote symlinks are not implemented.
 - Uploads are staged on the destination server. SSH publishes with atomic no-replace or explicit replacement; SFTP uses server rename semantics and fails without deleting the old destination if replacement is unsupported. FTP checks for conflicts immediately before rename, but the protocol cannot prevent a race with another client's concurrent changes. Failed connections may leave staging files for manual cleanup. Mutations are never automatically retried.
+- F2 uses a server-side rename for FTP, SFTP, and SSH. SSH requires an atomic no-replace rename primitive on the server (Linux `renameat2` or macOS `renamex_np`); unsupported servers fail without copying or deleting. FTP has the same concurrent-client race described above. If a connection fails during rename, inspect both names before retrying.
 - Transfers involving remote providers check the source byte count, and upload commits verify the staged file size before publication. These checks detect truncation or size changes, not same-size content changes. Failed moves retain their source. Job errors include the staging location if cleanup may need attention. If publication cannot be confirmed after a disconnect, inspect the destination before retrying: the server may already have completed the rename.
 - FTP seeking uses REST and new transfer connections, so servers must support REST for random access. ZIP, tar, 7z, gzip, and bounded RAR inputs can use remote sources without a local extracted tree. Archive indexing may read significant remote data.
 

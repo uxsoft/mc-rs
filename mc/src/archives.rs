@@ -13,9 +13,23 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+// ZIP containers keep their application-specific names, but share one driver.
+// Keep recognition and driver dispatch on the same list.
+const ZIP_EXTENSIONS: &[&str] = &[
+    "zip", "jar", "war", "ear", "docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "xltx", "xltm",
+    "xlsb", "xlam", "pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "ppam", "sldx", "sldm", "vsdx",
+    "vsdm", "vssx", "vssm", "vstx", "vstm", "thmx",
+];
+fn zip_container(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| ZIP_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
 pub fn supported(path: &VfsPath) -> bool {
+    if zip_container(&path.path) {
+        return true;
+    }
     path.path.extension().is_some_and(|e| {
-        ["zip", "rar", "tar", "7z", "gz", "tgz"]
+        ["rar", "tar", "7z", "gz", "tgz"]
             .iter()
             .any(|x| e.eq_ignore_ascii_case(x))
     })
@@ -336,7 +350,7 @@ pub fn open(source: VfsPath, ctx: &Context, progress: impl Fn(u64)) -> Result<Vf
         "Nested archives are limited to 8 levels"
     );
     let name = source.path.to_string_lossy().to_lowercase();
-    let driver = if name.ends_with(".zip") {
+    let driver = if zip_container(&source.path) {
         Driver::Zip
     } else if name.ends_with(".7z") {
         Driver::SevenZip

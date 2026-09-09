@@ -58,6 +58,11 @@ pub const MENUS: &[Menu] = &[
                 action: Action::Jobs,
             },
             Item {
+                label: "Rename in place…",
+                shortcut: "F2",
+                action: Action::Function(2),
+            },
+            Item {
                 label: "Quit",
                 shortcut: "F10",
                 action: Action::Function(10),

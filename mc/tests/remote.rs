@@ -129,6 +129,34 @@ fn remote_server_contracts() {
         assert_eq!(all, "hello world");
         drop(reader);
 
+        let renamed = root.join("renamed ' é.txt");
+        root.fs
+            .rename_in_place(&input.path, &renamed.path, &ctx)
+            .unwrap();
+        assert!(input.metadata(false, &ctx).is_err());
+        assert_eq!(renamed.metadata(false, &ctx).unwrap().size, 11);
+        assert!(
+            root.fs
+                .rename_in_place(&renamed.path, &root.join("folder").path, &ctx)
+                .is_err()
+        );
+        assert_eq!(renamed.metadata(false, &ctx).unwrap().size, 11);
+        root.fs
+            .rename_in_place(&renamed.path, &input.path, &ctx)
+            .unwrap();
+        let folder = root.join("folder");
+        let renamed_folder = root.join("renamed folder");
+        root.fs
+            .rename_in_place(&folder.path, &renamed_folder.path, &ctx)
+            .unwrap();
+        assert_eq!(
+            renamed_folder.metadata(false, &ctx).unwrap().kind,
+            Kind::Directory
+        );
+        root.fs
+            .rename_in_place(&renamed_folder.path, &folder.path, &ctx)
+            .unwrap();
+
         let metadata = Metadata {
             kind: Kind::File,
             size: 7,

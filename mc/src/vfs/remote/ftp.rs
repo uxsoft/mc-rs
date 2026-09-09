@@ -267,6 +267,22 @@ impl FileSystem for Ftp {
         self.session(ctx)?.mkdir(wire_path(path)?)?;
         Ok(())
     }
+    fn rename_in_place(&self, from: &Path, to: &Path, ctx: &Context) -> Result<()> {
+        let from = wire_path(from)?;
+        let to = wire_path(to)?;
+        let mut ftp = self.session(ctx)?;
+        match Self::stat(&mut ftp, &to, ctx) {
+            Ok(_) => bail!("Destination already exists: {to}"),
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        ctx.check()?;
+        ftp.rename(&from, &to)
+            .context("FTP rename could not be confirmed; inspect both names before retrying")?;
+        Ok(())
+    }
     fn remove(&self, path: &Path, directory: bool, ctx: &Context) -> Result<()> {
         let path = wire_path(path)?;
         ensure!(path != "/", "Cannot remove an FTP root");

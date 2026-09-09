@@ -165,6 +165,11 @@ pub trait FileSystem: Send + Sync {
     fn rename(&self, _from: &Path, _to: &Path, _ctx: &Context) -> Result<()> {
         bail!("Rename unsupported by this filesystem")
     }
+    /// Explicit rename; callers must propagate failures without a copy/remove fallback.
+    /// Providers should refuse existing targets; FTP cannot guarantee this atomically.
+    fn rename_in_place(&self, from: &Path, to: &Path, ctx: &Context) -> Result<()> {
+        self.rename(from, to, ctx)
+    }
     fn read_link(&self, _path: &Path, _ctx: &Context) -> Result<PathBuf> {
         bail!("Links unsupported by this filesystem")
     }

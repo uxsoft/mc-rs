@@ -162,22 +162,32 @@ fn archive_can_mount_over_a_seekable_nonlocal_provider() {
     zip.start_file("hello", zip::write::SimpleFileOptions::default())
         .unwrap();
     zip.write_all(b"virtual archive").unwrap();
-    source
-        .files
-        .lock()
-        .unwrap()
-        .insert("files.zip".into(), zip.finish().unwrap().into_inner());
-    let path = VfsPath::new(source, PathBuf::from("files.zip"));
-    let root = archives::open(path.clone(), &Context::default(), |_| {}).unwrap();
-    assert_eq!(root.parent().unwrap(), path.parent().unwrap());
-    assert!(root.local_path().is_none());
-    let file = root.join("hello");
-    let mut reader = file.fs.open_read(&file.path, &Context::default()).unwrap();
-    drop(root);
-    drop(file);
-    let mut bytes = vec![];
-    reader.read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes, b"virtual archive");
+    let data = zip.finish().unwrap().into_inner();
+    for name in [
+        "files.zip",
+        "app.JAR",
+        "document.DOCX",
+        "slides.pptx",
+        "workbook.xlsx",
+    ] {
+        source
+            .files
+            .lock()
+            .unwrap()
+            .insert(name.into(), data.clone());
+        let path = VfsPath::new(source.clone(), PathBuf::from(name));
+        assert!(archives::supported(&path));
+        let root = archives::open(path.clone(), &Context::default(), |_| {}).unwrap();
+        assert_eq!(root.parent().unwrap(), path.parent().unwrap());
+        assert!(root.local_path().is_none());
+        let file = root.join("hello");
+        let mut reader = file.fs.open_read(&file.path, &Context::default()).unwrap();
+        drop(root);
+        drop(file);
+        let mut bytes = vec![];
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"virtual archive");
+    }
 }
 #[test]
 fn dropping_a_bounded_stream_stops_its_producer() {

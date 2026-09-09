@@ -43,6 +43,17 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
     try:
         pump(.7)
         assert b'alpha.txt' in output
+        send(b'alpha')  # Typing in a pane starts quick navigation directly.
+        output.clear()
+        send(b'\x0c')  # Repaint to inspect a complete frame.
+        assert b'Find: alpha' in output
+        for name in ['renamed é.txt', 'alpha.txt']:
+            send(b'\x1bOQ')  # F2 renames the highlighted item in place.
+            assert b'Rename in place' in output
+            send(b'\x15' + name.encode() + b'\r')
+            wait_for(lambda: (left / name).exists())
+            pump(.2)  # Allow the completed job's listing to reveal the new name.
+        send(b'\x1b[H')  # Home clears the query and returns to the parent row.
         send(b'\x1b[20~')  # F9 File dropdown
         assert b'Create directory' in output
         send(b'\x1b[C')  # switch to View
@@ -52,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
         send(b'\x1b[<0;7;1M'); send(b'\x1b[<0;7;1m')  # File title
         send(b'\x1b[<0;12;7M'); send(b'\x1b[<0;12;7m')  # Background jobs
         send(b'\x0c')
-        assert b'No jobs yet.' in output
+        assert b'Background jobs' in output and b'Rename' in output
         send(b'\r')
         send(b'\x1b[<0;18;1M'); send(b'\x1b[<0;18;1m')  # Go title
         send(b'\x1b[B'); send(b'\r')  # Find dialog

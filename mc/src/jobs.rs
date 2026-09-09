@@ -12,6 +12,7 @@ use std::{
 pub enum Operation {
     Copy,
     Move,
+    Rename,
     Trash,
     Delete,
     Mkdir,
@@ -264,8 +265,10 @@ fn start_inner(
                 .map(reconnect_path)
                 .collect::<Result<Vec<_>>>()?;
             let destination = reconnect_path(&destination)?;
-            if matches!(op, Operation::Copy | Operation::Move | Operation::Mkdir)
-                && !destination.fs.capabilities().write
+            if matches!(
+                op,
+                Operation::Copy | Operation::Move | Operation::Rename | Operation::Mkdir
+            ) && !destination.fs.capabilities().write
             {
                 bail!("Read-only destination");
             }
@@ -280,6 +283,25 @@ fn start_inner(
                 worker.check()?;
                 progress.lock().unwrap().current = source.display().to_string();
                 match op {
+                    Operation::Rename => {
+                        anyhow::ensure!(sources.len() == 1, "Rename requires one item");
+                        anyhow::ensure!(
+                            source.fs.id() == destination.fs.id()
+                                && source.path.parent() == destination.path.parent(),
+                            "Rename must stay in the same directory"
+                        );
+                        anyhow::ensure!(source.path != destination.path, "Name is unchanged");
+                        anyhow::ensure!(
+                            lookup(&destination, &worker.ctx)?.is_none(),
+                            "An item named {} already exists",
+                            destination
+                        );
+                        worker.check()?;
+                        source
+                            .fs
+                            .rename_in_place(&source.path, &destination.path, &worker.ctx)?;
+                        progress.lock().unwrap().files += 1;
+                    }
                     Operation::Trash => {
                         source.fs.trash(&source.path, &worker.ctx)?;
                         progress.lock().unwrap().files += 1;
@@ -357,7 +379,10 @@ pub fn resources(op: Operation, sources: &[VfsPath], destination: &VfsPath) -> V
                 .filter_map(|p| p.file_name())
                 .map(|n| destination.join(n)),
         );
-    } else if matches!(op, Operation::Copy | Operation::Move | Operation::Mkdir) {
+    } else if matches!(
+        op,
+        Operation::Copy | Operation::Move | Operation::Rename | Operation::Mkdir
+    ) {
         paths.push(destination.clone());
     }
     let backing: Vec<_> = paths

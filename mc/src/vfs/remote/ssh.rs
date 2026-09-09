@@ -311,6 +311,19 @@ impl FileSystem for Ssh {
             bail!("SSH helper moves use safe copy and remove")
         }
     }
+    fn rename_in_place(&self, from: &Path, to: &Path, ctx: &Context) -> Result<()> {
+        if self.sftp.is_some() {
+            return self
+                .rename(from, to, ctx)
+                .context("SFTP rename failed; inspect both names before retrying");
+        }
+        self.call(
+            json!({"op":"rename", "path":wire_path(from)?, "to":wire_path(to)?}),
+            ctx,
+        )
+        .context("SSH rename failed; inspect both names before retrying")?;
+        Ok(())
+    }
     fn read_link(&self, path: &Path, ctx: &Context) -> Result<PathBuf> {
         ctx.check()?;
         let path = wire_path(path)?;

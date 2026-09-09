@@ -59,6 +59,28 @@ def main():
     elif op == "mkdir":
         os.mkdir(path)
         reply(None)
+    elif op == "rename":
+        # An explicit rename must never turn into copy/delete after a lost reply.
+        # Refuse platforms without an atomic no-replace rename primitive.
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        source, target = os.fsencode(path), os.fsencode(r["to"])
+        if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            rename = libc.renameat2
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            result = rename(-100, source, -100, target, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+            rename = libc.renamex_np
+            rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            result = rename(source, target, 4)  # RENAME_EXCL
+        else:
+            raise ValueError("Atomic no-replace rename is unavailable on this SSH server")
+        if result != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+        reply(None)
     elif op == "remove":
         (os.rmdir if r["directory"] else os.unlink)(path)
         reply(None)

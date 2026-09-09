@@ -29,8 +29,8 @@ pub fn for_entry(name: &str, directory: bool, link: bool) -> &'static str {
     }
     let extension = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
     match extension {
-        "zip" | "rar" | "tar" | "7z" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "lz" | "lzma"
-        | "tbz2" | "txz" => "\u{f1c6}", // fa-file_zipper
+        "zip" | "jar" | "war" | "ear" | "rar" | "tar" | "7z" | "gz" | "tgz" | "bz2" | "xz"
+        | "zst" | "lz" | "lzma" | "tbz2" | "txz" => "\u{f1c6}", // fa-file_zipper
         "rs" => "\u{e7a8}",                         // dev-rust
         "py" | "pyi" | "pyw" => "\u{e73c}",         // dev-python
         "js" | "jsx" | "mjs" | "cjs" => "\u{e74e}", // dev-javascript
@@ -46,14 +46,17 @@ pub fn for_entry(name: &str, directory: bool, link: bool) -> &'static str {
         | "avif" | "heic" => "\u{f1c5}", // fa-file_image
         "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff" => "\u{f1c7}", // fa-file_audio
         "mp4" | "mkv" | "mov" | "avi" | "webm" | "mpeg" | "mpg" | "m4v" => "\u{f1c8}", // fa-file_video
-        "pdf" => "\u{f1c1}",                                  // fa-file_pdf
-        "doc" | "docx" | "odt" | "rtf" => "\u{f1c2}",         // fa-file_word
-        "xls" | "xlsx" | "ods" | "csv" | "tsv" => "\u{f1c3}", // fa-file_excel
-        "ppt" | "pptx" | "odp" => "\u{f1c4}",                 // fa-file_powerpoint
-        "db" | "sqlite" | "sqlite3" | "sql" => "\u{f1c0}",    // fa-database
-        "ttf" | "otf" | "woff" | "woff2" => "\u{f031}",       // fa-font
+        "pdf" => "\u{f1c1}", // fa-file_pdf
+        "doc" | "docx" | "docm" | "dotx" | "dotm" | "odt" | "rtf" => "\u{f1c2}", // fa-file_word
+        "xls" | "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm" | "xlam" | "ods" | "csv" | "tsv" => {
+            "\u{f1c3}"
+        } // fa-file_excel
+        "ppt" | "pptx" | "pptm" | "potx" | "potm" | "ppsx" | "ppsm" | "ppam" | "sldx" | "sldm"
+        | "odp" => "\u{f1c4}", // fa-file_powerpoint
+        "db" | "sqlite" | "sqlite3" | "sql" => "\u{f1c0}", // fa-database
+        "ttf" | "otf" | "woff" | "woff2" => "\u{f031}", // fa-font
         "exe" | "msi" | "dll" | "so" | "dylib" | "bin" => "\u{f085}", // fa-gears
-        "md" | "txt" | "rst" | "log" | "adoc" => "\u{f15c}",  // fa-file_lines
-        _ => "\u{f15b}", // fa-file: unknown types and extensionless files
+        "md" | "txt" | "rst" | "log" | "adoc" => "\u{f15c}", // fa-file_lines
+        _ => "\u{f15b}",     // fa-file: unknown types and extensionless files
     }
 }

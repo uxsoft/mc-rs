@@ -42,6 +42,9 @@ zip = { version = "2", default-features = false, features = ["deflate", "aes-cry
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tar = "0.4"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress", "aes256"] }

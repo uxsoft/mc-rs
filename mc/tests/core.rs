@@ -229,6 +229,59 @@ fn zip_tar_and_gzip_are_readable() {
     assert_eq!(read_virtual(m.join("folder/file.txt")), b"hello");
 }
 #[test]
+fn zip_based_application_files_support_browsing_nested_mounts_and_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file(
+        "contents/document.xml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"<document>hello</document>").unwrap();
+    let data = zip.finish().unwrap().into_inner();
+    for extension in [
+        "jar", "WAR", "ear", "docx", "DOCM", "dotx", "dotm", "xlsx", "xlsm", "xlsb", "xltx",
+        "xltm", "xlam", "pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "ppam", "sldx", "sldm",
+        "vsdx", "vsdm", "vssx", "vssm", "vstx", "vstm", "thmx",
+    ] {
+        let path = dir.path().join(format!("package.{extension}"));
+        fs::write(&path, &data).unwrap();
+        let source: VfsPath = path.into();
+        assert!(archives::supported(&source), "{extension}");
+        let mount = archives::open(source, &Context::default(), |_| {}).unwrap();
+        assert!(!mount.fs.capabilities().write);
+        assert_eq!(
+            read_virtual(mount.join("contents/document.xml")),
+            b"<document>hello</document>"
+        );
+    }
+    for extension in ["doc", "xls", "ppt", "exe"] {
+        assert!(!archives::supported(
+            &dir.path().join(format!("legacy.{extension}")).into()
+        ));
+    }
+    let outer = dir.path().join("bundle.jar");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&outer).unwrap());
+    zip.start_file("embedded.docx", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(&data).unwrap();
+    zip.finish().unwrap();
+    let mount = archives::open(outer.into(), &Context::default(), |_| {}).unwrap();
+    let inner = archives::open(mount.join("embedded.docx"), &Context::default(), |_| {}).unwrap();
+    let destination = dir.path().join("copied.xml");
+    let job = jobs::start(
+        Operation::Copy,
+        vec![inner.join("contents/document.xml")],
+        destination.clone().into(),
+        Context::default(),
+    );
+    assert_eq!(wait(&job, Decision::Cancel), None);
+    assert_eq!(
+        fs::read(destination).unwrap(),
+        b"<document>hello</document>"
+    );
+}
+#[test]
 fn rar_and_sevenz_fixtures_are_readable() {
     for format in ["rar", "7z"] {
         let m = archives::open(
@@ -327,6 +380,31 @@ fn unicode_wildcards() {
     assert!(mc::app::wildcard("*.rs", "hello.rs"));
     assert!(mc::app::wildcard("?afé", "café"));
     assert!(!mc::app::wildcard("*.rs", "hello.txt"));
+}
+#[test]
+fn explicit_rename_refuses_existing_files_and_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("source"), "source data").unwrap();
+    fs::write(dir.path().join("existing"), "keep me").unwrap();
+    fs::create_dir(dir.path().join("folder")).unwrap();
+    let source: VfsPath = dir.path().join("source").into();
+    for target in ["existing", "folder"] {
+        assert!(
+            source
+                .fs
+                .rename_in_place(&source.path, &dir.path().join(target), &Context::default())
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&source.path).unwrap(), "source data");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("existing")).unwrap(),
+            "keep me"
+        );
+    }
+    let destination: VfsPath = dir.path().join("folder").into();
+    let resources = jobs::resources(Operation::Rename, &[source], &destination);
+    let target_resources = jobs::resources(Operation::Delete, &[destination], &dir.path().into());
+    assert!(jobs::overlaps(&resources, &target_resources));
 }
 #[test]
 fn render_small_and_normal_terminals() {

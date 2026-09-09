@@ -139,7 +139,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             },
             p.label()
         );
-        let bottom = if p.selected.is_empty() {
+        let bottom = if i == app.active && !app.quick.is_empty() {
+            let query = app.quick.trim_start_matches('\0');
+            let text = if query.is_empty() {
+                " Type a filename · Esc cancels ".to_string()
+            } else {
+                format!(
+                    " Find: {query}{} ",
+                    if app.quick_found { "" } else { " · No match" }
+                )
+            };
+            clip_line(&text, rect.width.saturating_sub(2) as usize)
+        } else if p.selected.is_empty() {
             format!(
                 " {} items · {:?}{} ",
                 p.entries.len(),
@@ -267,7 +278,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let buttons = Layout::horizontal([Constraint::Ratio(1, 10); 10]).split(rows[2]);
     for (i, label) in [
-        "Help", "—", "View", "Edit", "Copy", "Move", "Mkdir", "Delete", "Menu", "Quit",
+        "Help", "Rename", "View", "Edit", "Copy", "Move", "Mkdir", "Delete", "Menu", "Quit",
     ]
     .iter()
     .enumerate()
