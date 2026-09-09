@@ -6,6 +6,7 @@ use suppaftp::{DataStream, FtpStream, Mode, types::FileType};
 pub(super) struct Ftp {
     endpoint: Endpoint,
     password: Arc<Secret>,
+    mfmt: bool,
 }
 fn control(endpoint: &Endpoint, ctx: &Context) -> Result<FtpStream> {
     let socket = socket(endpoint, ctx)?;
@@ -43,7 +44,11 @@ impl Ftp {
             safe(&password)?;
             let mut ftp = control(&endpoint, ctx)?;
             if ftp.login(&endpoint.user, &password).is_ok() {
+                let mfmt = ftp
+                    .feat()
+                    .is_ok_and(|features| features.keys().any(|k| k.eq_ignore_ascii_case("MFMT")));
                 return Ok(Self {
+                    mfmt,
                     endpoint,
                     password: Arc::new(password),
                 });
@@ -61,6 +66,19 @@ impl Ftp {
         Ok(ftp)
     }
     fn listing(ftp: &mut FtpStream, path: &str, ctx: &Context) -> Result<Vec<DirEntry>> {
+        let mut entries = vec![];
+        Self::visit_listing(ftp, path, ctx, &mut |e| {
+            entries.push(e);
+            Ok(())
+        })?;
+        Ok(entries)
+    }
+    fn visit_listing(
+        ftp: &mut FtpStream,
+        path: &str,
+        ctx: &Context,
+        emit: &mut dyn FnMut(DirEntry) -> Result<()>,
+    ) -> Result<()> {
         ctx.check()?;
         // CWD avoids LIST treating a filename beginning with '-' as an option.
         ftp.cwd(path)?;
@@ -75,7 +93,7 @@ impl Ftp {
             Err(e) => return Err(e.into()),
         };
         let mut reader = BufReader::new(stream);
-        let mut entries = vec![];
+        let mut count = 0;
         let mut total = 0;
         loop {
             ctx.check()?;
@@ -109,11 +127,9 @@ impl Ftp {
                 continue;
             }
             remote_name(file.name())?;
-            ensure!(
-                entries.len() < 100_000,
-                "Remote directory exceeds 100,000 entries"
-            );
-            entries.push(DirEntry {
+            ensure!(count < 100_000, "Remote directory exceeds 100,000 entries");
+            count += 1;
+            emit(DirEntry {
                 name: file.name().into(),
                 metadata: Metadata {
                     kind: if file.is_symlink() {
@@ -129,10 +145,10 @@ impl Ftp {
                     modified: file.modified(),
                     permissions: None,
                 },
-            });
+            })?;
         }
         ftp.close_data_connection(reader.into_inner())?;
-        Ok(entries)
+        Ok(())
     }
     fn stat(ftp: &mut FtpStream, path: &str, ctx: &Context) -> Result<Metadata> {
         if path == "/" {
@@ -182,6 +198,14 @@ impl FileSystem for Ftp {
     fn read_dir(&self, path: &Path, ctx: &Context) -> Result<Vec<DirEntry>> {
         Self::listing(&mut self.session(ctx)?, &wire_path(path)?, ctx)
     }
+    fn visit_dir(
+        &self,
+        path: &Path,
+        ctx: &Context,
+        emit: &mut dyn FnMut(DirEntry) -> Result<()>,
+    ) -> Result<()> {
+        Self::visit_listing(&mut self.session(ctx)?, &wire_path(path)?, ctx, emit)
+    }
     fn open_read(&self, path: &Path, ctx: &Context) -> Result<Box<dyn Read + Send>> {
         Ok(Box::new(self.open_seek(path, ctx)?))
     }
@@ -230,7 +254,14 @@ impl FileSystem for Ftp {
             overwrite,
             ctx: ctx.clone(),
             committed: false,
+            written: 0,
         }))
+    }
+    fn set_metadata(&self, path: &Path, metadata: &Metadata, ctx: &Context) -> Result<()> {
+        if self.mfmt && metadata.kind == Kind::File {
+            set_mtime(&mut self.session(ctx)?, &wire_path(path)?, metadata)?;
+        }
+        Ok(())
     }
     fn mkdir(&self, path: &Path, ctx: &Context) -> Result<()> {
         self.session(ctx)?.mkdir(wire_path(path)?)?;
@@ -336,22 +367,39 @@ struct Writer {
     overwrite: bool,
     ctx: Context,
     committed: bool,
+    written: u64,
 }
 impl Write for Writer {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.ctx.check().map_err(io::Error::other)?;
-        self.data.as_mut().unwrap().write(data)
+        let n = self.data.as_mut().unwrap().write(data)?;
+        self.written += n as u64;
+        Ok(n)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.data.as_mut().unwrap().flush()
     }
 }
 impl WriteHandle for Writer {
-    fn commit(mut self: Box<Self>, _metadata: &Metadata) -> Result<()> {
+    fn staging_location(&self) -> Option<String> {
+        Some(self.fs.endpoint.label(Path::new(&self.stage_dir)))
+    }
+    fn commit(mut self: Box<Self>, metadata: &Metadata) -> Result<()> {
         self.ctx.check()?;
+        ensure!(
+            self.written == metadata.size,
+            "Incomplete FTP upload; destination was not published"
+        );
         let data = self.data.take().unwrap();
         let ftp = self.ftp.as_mut().unwrap();
         ftp.finalize_put_stream(data)?;
+        ensure!(
+            Ftp::stat(ftp, &self.stage, &self.ctx)?.size == self.written,
+            "FTP server stored an unexpected byte count; destination was not published"
+        );
+        if self.fs.mfmt {
+            set_mtime(ftp, &self.stage, metadata)?;
+        }
         match Ftp::stat(ftp, &self.destination, &self.ctx) {
             Ok(meta) => {
                 ensure!(
@@ -370,7 +418,7 @@ impl WriteHandle for Writer {
         }
         self.ctx.check()?;
         // FTP has no conditional rename. Never delete the old destination to make RNTO succeed.
-        ftp.rename(&self.stage, &self.destination)?;
+        ftp.rename(&self.stage, &self.destination).context("FTP publication could not be confirmed; inspect the destination before retrying. The client did not delete it or retry the rename")?;
         self.committed = true;
         let _ = ftp.rmdir(&self.stage_dir);
         Ok(())
@@ -388,4 +436,16 @@ impl Drop for Writer {
             }
         }
     }
+}
+
+fn set_mtime(ftp: &mut FtpStream, path: &str, metadata: &Metadata) -> Result<()> {
+    let stamp: chrono::DateTime<chrono::Utc> = metadata.modified.into();
+    ftp.custom_command(
+        format!("MFMT {} {path}", stamp.format("%Y%m%d%H%M%S")),
+        &[
+            suppaftp::Status::File,
+            suppaftp::Status::RequestedFileActionOk,
+        ],
+    )?;
+    Ok(())
 }

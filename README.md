@@ -19,17 +19,38 @@ cargo run --manifest-path mc/Cargo.toml --release -- /path/to/left /path/to/righ
 
 Both directories are optional and default to the current directory. `--help` and `--version` work without a terminal. Run inside a terminal with keyboard and mouse support.
 
-Set your terminal font to a [Nerd Font](https://www.nerdfonts.com/) (use a Mono variant for consistent cell spacing) to display file type icons. Both panels show icons for directories, symlinks, archives, source code, documents, media, and other common file types, including inside archives. Unknown types use a generic file icon. Icons are always enabled; fonts without these glyphs may show empty boxes.
+With mise, install the `mc-rs` package and launch its `mc` executable. After installing the build dependencies above:
+
+```sh
+env MISE_CARGO_BINSTALL=false mise use -g cargo:mc-rs@0.2.6
+mise exec cargo:mc-rs -- mc --version
+mise exec cargo:mc-rs -- mc
+```
+
+This uses Cargo source installation, avoiding prebuilt-binary lookups (the project does not publish GitHub release binaries). For bare `mc` in Fish, put `mise activate fish | source` in `~/.config/fish/config.fish` and open a new terminal. Version 0.2.6 was verified through an isolated mise source install; the package and executable names differ intentionally.
+
+Set your terminal font to a [Nerd Font](https://www.nerdfonts.com/) (use a Mono variant for consistent cell spacing) to display file type icons. Both panels show icons for directories, symlinks, archives, source code, documents, media, and other common file types, including inside archives. Unknown types use a generic file icon. Icons are always enabled; fonts without these glyphs may show empty boxes or unrelated characters.
+
+Installing the font alone is insufficient: select its exact family in your terminal settings. If folders look correct but source file icons look like Chinese characters, font fallback may be selecting different fonts for the Font Awesome folder glyphs and Devicons language glyphs. For example, with CaskaydiaMono installed, add this to Alacritty's `~/.config/alacritty/alacritty.toml` (see the [Alacritty font settings](https://alacritty.org/config-alacritty.html#font)):
+
+```toml
+[font.normal]
+family = "CaskaydiaMono Nerd Font Mono"
+```
+
+Alacritty inherits this family for bold and italic text unless explicitly overridden. Other terminals need the equivalent font selection in their settings. Open a new terminal after changing it; no `mc` rebuild is needed.
 
 F3 requires `cat` on PATH, including Windows. F4 uses `VISUAL`, then `EDITOR`, then `vi` on Unix or `notepad` on Windows. Editor arguments are parsed as quoted words and invoked directly; shell expressions are not evaluated. `cat` output stays visible until Enter returns to the file manager.
 
-Linux and macOS binaries dynamically link libarchive, which must also be installed on the destination machine. CI prepares native artifacts for Linux x64/ARM64, macOS ARM64, and Windows x64. **Only Linux x64 has been validated locally; the CI matrix has not yet run.**
+Linux and macOS binaries dynamically link libarchive, which must also be installed on the destination machine. [CI run 6](https://github.com/uxsoft/mc-rs/actions/runs/34316119517) passed native builds, Rust tests, and Clippy on Linux x64/ARM64, macOS ARM64, and Windows x64, then published 0.2.6. Interactive remote runtime testing has been performed on Linux x64; other clients still need that coverage.
 
 ## Everyday operations
 
 - Browse independent panels, sort by name/size/date through F9, toggle hidden files, and select multiple items with Space, Insert, or right-click. Selected directories are sized recursively in the background; their size appears in the Size column, and the selection total appears in each panel’s bottom border. Hidden files are included; symlinks are counted by link length without following their targets. Unreadable entries mark totals as partial. Ctrl+R refreshes cached sizes.
 - Copy and move into the opposite panel, or enter a new destination/name. Same-filesystem moves use an atomic no-replace rename where possible. Cross-filesystem moves and directory merges copy before removing source data.
-- Jobs run in the background. Unrelated jobs can run together; jobs with overlapping source/destination paths are rejected until the running job finishes. F9 → File → Background jobs shows progress, errors, and cancellation.
+- Jobs run in the background. Unrelated jobs can run together; jobs with overlapping source/destination paths are rejected until the running job finishes. F9 → File → Background jobs lists every job. Use arrows or the mouse to select one, `c` to cancel it, and `r` to explicitly retry a failed/cancelled job. The selected transfer shows a per-file progress bar, average speed, and estimated remaining time for that file. Retry opens fresh SSH sessions and restarts remaining top-level sources; completed top-level sources are skipped and conflicts ask again. It does not resume partial bytes or automatically replay mutations.
+- Panels show listing batches as they arrive. Idle panels refresh every 3 seconds locally and 15 seconds remotely; automatic refresh pauses during jobs, modal work, and selection. Ctrl+R always requests a refresh.
+- Copies preserve file/directory modification times locally and over SSH/SFTP, and ordinary Unix permission bits when the client is Unix. FTP preserves regular-file modification times when the server advertises MFMT; FTP directory times and permissions are not portable and are not preserved. Windows clients retain local native permissions but do not translate Unix modes. Archive headers supply stored modification times and Unix modes where available; ZIP/RAR DOS times use the client’s local timezone and format precision. Gzip uses its header time or the source time. Ownership, ACLs, extended attributes, special permission bits, and symlink timestamps are not copied.
 - An existing file prompts for overwrite, skip, overwrite all, or skip all. Enter defaults to skip. Directory copies merge into existing plain directories; incompatible file/directory collisions stop with an error.
 - F8 defaults to the operating system's trash. Choose permanent deletion explicitly with Tab or the mouse. Trash failures never fall back to permanent deletion.
 - Recursive filename search matches a case-insensitive substring, reports unreadable paths, and stops at 100,000 results. Enter navigates to and highlights the selected result. Directory symlinks are not traversed.
@@ -72,7 +93,7 @@ Archive panels keep an entry index in memory. Navigation, filename search, and d
 
 ZIP (AES and ZipCrypto), 7z, and RAR can request a password. Enter submits, Esc cancels; incorrect passwords can be retried. The field is masked and credentials stay in the archive session, never in paths, command arguments, or configuration files. The application's password buffers are zeroized when dropped; decoder libraries may keep their own copies. Passwords are forgotten when the last panel, job, or open handle releases that session.
 
-ZIP uses the Rust `zip` decoder, 7z uses `sevenz-rust2`, RAR uses `rars`, tar uses libarchive, and gzip uses flate2. No archive CLI helpers are needed. ZIP supports stored/deflated content; other compression methods may report unsupported. Multipart archives and archive modification remain unsupported. Nested archive browsing needs a seekable source; archive-member streams currently do not provide one. RAR currently needs a local archive file, isolated within its VFS adapter.
+ZIP uses the Rust `zip` decoder, 7z uses `sevenz-rust2`, RAR uses `rars`, tar uses libarchive, and gzip uses flate2. No archive CLI helpers are needed. ZIP supports stored/deflated content; other compression methods may report unsupported. Multipart archives and archive modification remain unsupported. Nested archives use a memory-only seek cache capped at 64 MiB per member, with at most eight archive levels. Remote and nested RAR inputs are also limited to 64 MiB because the decoder needs an owned input buffer. Larger inputs fail with instructions to copy the archive locally. No plaintext cache is written to disk; cache limits exclude archive indexes, decoder dictionaries, and library-owned copies.
 
 Decoded output uses a bounded channel (two 64 KiB chunks), plus decoder dictionaries and the metadata index. A validation pass precedes streaming the selected member, so password retries cannot release incorrect plaintext; this reads selected content twice. Solid archives can require decoding preceding members too. Compressed tar header scanning and standalone gzip size calculation may require decompressing the compressed stream, without writing it to disk. Some RAR5 transforms need buffered decoding, capped at 32 MiB; decoder dictionary memory is additional.
 
@@ -90,22 +111,19 @@ mc 'ssh://alice@example.com:2222/home/alice' 'ftp://user@files.example.com/publi
 ```
 
 - `sftp://` uses the server's SFTP subsystem. `ssh://` works without SFTP by running an embedded Python 3 helper on a Unix server through its SSH login shell. The helper receives paths and content through stdin; filenames never become shell commands. It is not installed on the server.
-- SSH authentication tries the SSH agent, `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`, then a masked password/private-key passphrase prompt. Host keys must already match `~/.ssh/known_hosts`. For a new host, connect once with your SSH client (for example `ssh -p 2222 alice@example.com`), verify its fingerprint, and accept it there before using mc. Unknown or changed keys are never accepted automatically. `~/.ssh/config`, jump hosts, keyboard-interactive/MFA, and custom key selection are not implemented; load custom keys into your agent.
+- For `ssh://`, noninteractive shell startup must not read stdin or print to stdout. Keep banners and terminal utilities inside an interactive-shell guard (in Fish: `if status is-interactive` … `end`). SFTP avoids the login-shell helper.
+- SSH reads `~/.ssh/config`: `Host` patterns/negation, `Include` (filename wildcards), `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`, and `ProxyJump` (including comma-separated hops). Explicit URL user/port overrides configuration. The first matching scalar value wins; identity files accumulate. Key paths support `~/` and `%d/%h/%n/%r/%p/%%`. This is a non-executing subset: Match, ProxyCommand, HostKeyAlias, UserKnownHostsFile, and CertificateFile are unsupported and fail explicitly when applicable. System SSH config is not read.
+- Authentication tries the agent (unless IdentitiesOnly), configured/default keys, then masked keyboard-interactive/MFA and password/key-passphrase prompts. MFA responses are masked even if the server requests echo. Default keys are `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`.
+- Existing host keys must match `~/.ssh/known_hosts`; changed keys always fail. For an unknown host, mc displays its SHA256 fingerprint. Verify it independently and type `trust` to accept it for that connection only. It does not modify known_hosts; use your SSH client to record permanent trust. `StrictHostKeyChecking yes` disables session trust and requires a matching known_hosts entry. Each jump host is authenticated and verified separately, with at most eight hops.
 - `ftp://` is plain, unencrypted FTP using passive transfers. It defaults to anonymous login when the user is omitted. Named users get a masked password prompt. FTPS is not implemented. Passwords are rejected in URLs and are never saved in configuration.
 - Paths are absolute on the server. Spaces and URL delimiters can be percent-encoded. UTF-8 names are supported; control characters and backslashes are rejected. Within a remote panel, relative and absolute paths stay on that server. **Go → Local directory** returns to the process's local working directory; `file:///absolute/path` also opens a local location.
 - Browse, select/size directories, search filenames, F3 stream to `cat`, and copy/move/mkdir/permanently delete using the normal keys and background jobs. Remote files have no trash: F8 retains the trash default and explains that permanent deletion must be chosen explicitly. Remote editing and creating remote symlinks are not implemented.
 - Uploads are staged on the destination server. SSH publishes with atomic no-replace or explicit replacement; SFTP uses server rename semantics and fails without deleting the old destination if replacement is unsupported. FTP checks for conflicts immediately before rename, but the protocol cannot prevent a race with another client's concurrent changes. Failed connections may leave staging files for manual cleanup. Mutations are never automatically retried.
-- FTP seeking uses REST and new transfer connections, so servers must support REST for random access. ZIP, tar, 7z, and gzip can use remote sources without a local extracted tree; RAR still requires copying the archive locally. Archive indexing may read significant remote data.
+- Transfers involving remote providers check the source byte count, and upload commits verify the staged file size before publication. These checks detect truncation or size changes, not same-size content changes. Failed moves retain their source. Job errors include the staging location if cleanup may need attention. If publication cannot be confirmed after a disconnect, inspect the destination before retrying: the server may already have completed the rename.
+- FTP seeking uses REST and new transfer connections, so servers must support REST for random access. ZIP, tar, 7z, gzip, and bounded RAR inputs can use remote sources without a local extracted tree. Archive indexing may read significant remote data.
 
 Esc cancels connection/authentication work. Network calls have ten-second socket/SSH timeouts; cancellation can wait for an in-flight call or DNS lookup. Remote locks conservatively cover an entire user/host/port endpoint, including archive backing files. Reconnect via the connection menu after leaving an expired mount; active failed jobs are not resumed.
 
-## Current limits
-
-- No shell prompt, subshell, user command execution, built-in editor/viewer, plugins, or customization. F2 user menus are omitted. This is not full MC feature parity.
-- Copies preserve ordinary permissions, but not ownership, ACLs, extended attributes, sparse layout, or hard-link relationships. Copy timestamps are not yet preserved. Windows symlink creation needs the appropriate OS privilege; symlink overwrite can fail safely on Windows.
-- Cancellation preserves already completed work and removes incomplete temporary files; it is not rollback. An interrupted multi-file move may leave completed items at the destination and remaining items at the source. Trash calls cannot be interrupted midway through an OS operation.
-- Directory listings and searches run off the UI thread. Initial directory listings are delivered as a complete snapshot, not incrementally. No filesystem watcher; use Ctrl+R for external changes.
-- Jobs run only while mc is open. Quit with active jobs offers cancellation and waits for you to quit again after they finish. Jobs are not persisted across sessions.
 
 ## Development and validation
 
@@ -116,37 +134,14 @@ cargo test --manifest-path mc/Cargo.toml
 cargo build --manifest-path mc/Cargo.toml
 python3 mc/tests/terminal_smoke.py  # Linux/Unix pseudo-terminal integration test
 python3 mc/tests/archive_smoke.py   # encrypted archives, streamed cat, copy, retry/cancel
+python3 mc/tests/large_directory.py # 20,000 entries, keyboard response, automatic refresh
 # In a Python environment with pip:
 python3 -m pip install -r mc/tests/requirements-remote.txt
 python3 mc/tests/remote_servers.py  # isolated loopback FTP/SFTP/SSH + terminal tests
+python3 mc/tests/openssh_server.py # real OpenSSH; requires openssh-server, run as a normal user
 ```
 
 Tests use disposable files. The terminal smoke test redirects the Linux trash location to its own temporary directory. It exercises cat, copying, moving, mkdir, both deletion modes, search-result selection, mouse input, resize, and terminal restoration.
-
-See [PLAN.md](PLAN.md) for progress, architecture, acceptance criteria, and the next session's tasks.
-
-## Publishing to crates.io
-
-The single `.github/workflows/ci.yml` workflow builds/tests pushes to `master`, pull requests targeting `master`, and manual runs. Its **Publish to crates.io** job runs only on pushes to `master`, after all four native matrix jobs pass. GitHub releases no longer trigger publishing, and there is no separate publishing workflow or second CI matrix.
-
-CI stamps the package version as `major.minor.<github.run_number>`. For example, the checked-in version of `0.2.0` becomes `0.2.42` for workflow run 42. The major/minor values come from `mc/Cargo.toml`; its patch value is replaced. `.github/scripts/set_ci_version.py` updates the manifest and only the matching `mc-rs` lockfile entry in each runner's checkout. Tests, release binaries, artifact names, and the crate upload use the same version. The executable remains `mc`.
-
-Add a crates.io API token with publishing permission for `mc-rs` as the GitHub Actions repository secret `CARGO_REGISTRY_TOKEN`. Create/manage the token in [crates.io account settings](https://crates.io/settings/tokens); do not commit it. Then push the source changes to `master`. Keep `mc/LICENSE` synchronized with the root `LICENSE`; version stamping checks this.
-
-Version changes are temporary CI changes and are not committed or pushed back. Publishing uses `--locked --allow-dirty` for the stamped checkout and Cargo's built-in package verification before upload. The publishing token is exposed only to the upload step. Publishing jobs are serialized; PR and manual runs never receive the token or publish.
-
-GitHub reruns retain the same run number and version. If that version was already uploaded, crates.io rejects a second upload; use a new push for another version. Run numbers may have gaps from PR/manual/failed runs. See [GitHub's run-number documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/variables) and the [Cargo publishing command](https://doc.rust-lang.org/cargo/commands/cargo-publish.html).
-
-After publication, install with `cargo install mc-rs --locked` (with the build dependencies above installed). Source repository: [uxsoft/mc-rs](https://github.com/uxsoft/mc-rs).
-
-## CI efficiency
-
-- Rust downloads and compiled dependencies are cached per platform, target, compiler, and runner/native-library environment using [rust-cache](https://github.com/Swatinem/rust-cache). Restore happens before CI version stamping, keeping cache keys independent of the run number. The publisher restores the Linux x64 cache without saving another copy.
-- Windows uses a [vcpkg binary cache](https://learn.microsoft.com/en-us/vcpkg/consume/binary-caching-local) for libarchive and its dependencies, keyed by runner image, vcpkg revision, architecture, and triplet. Installation still runs so vcpkg can validate/reuse matching packages. Successful master pushes populate caches; PR/manual runs restore them without saving.
-- Formatting and version-script tests run once on Linux x64. Clippy, Rust tests, and release builds still run on all four platforms. Linux PTY tests use the already-built release binary via `MC_TEST_BINARY`; local test scripts default to `target/debug/mc`.
-- New PR commits cancel outdated native checks for that PR. Master runs retain their publishing flow. Build artifacts use compression level 1 and expire after 14 days.
-
-The first run is cold. Compiler, runner image, and dependency changes can invalidate caches. Compare subsequent Actions timings to measure savings; no speedup estimate has been measured yet.
 
 ## License and references
 

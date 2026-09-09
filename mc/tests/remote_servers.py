@@ -22,6 +22,24 @@ from pyftpdlib.servers import FTPServer
 
 class TestFTPHandler(FTPHandler):
     machine_listings = True
+    lost_renames = 0
+
+    def on_file_received(self, file):
+        if Path(self.fs.root, "fault-truncate-upload").exists():
+            with open(file, "r+b") as upload:
+                upload.truncate(3)
+
+    def ftp_RNTO(self, path):
+        self.drop_rename_reply = path.endswith("/reply-lost.txt")
+        if self.drop_rename_reply:
+            type(self).lost_renames += 1
+        return super().ftp_RNTO(path)
+
+    def respond(self, response, *args, **kwargs):
+        if getattr(self, "drop_rename_reply", False) and response.startswith("250"):
+            self.close()  # Rename succeeded, but its acknowledgement never arrives.
+            return
+        return super().respond(response, *args, **kwargs)
 
     def ftp_MLSD(self, path):
         if not self.machine_listings:
@@ -76,10 +94,22 @@ class Files(paramiko.SFTPServerInterface):
             f = os.fdopen(fd, "wb" if flags & os.O_WRONLY else "rb")
             handle.readfile = f
             handle.writefile = f
+            ordinary_write = handle.write
+            def write(offset, data):
+                if (self.root / "slow-upload").exists():
+                    __import__("time").sleep(0.025)
+                if (self.root / "fault-truncate-upload").exists():
+                    data = data[:3]
+                return ordinary_write(offset, data)
+            handle.write = write
+            handle.chattr = lambda attr: self.mutate(lambda: paramiko.SFTPServer.set_file_attr(self.path(path), attr))
             handle.stat = lambda: paramiko.SFTPAttributes.from_stat(os.fstat(f.fileno()))
             return handle
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
+
+    def chattr(self, path, attr):
+        return self.mutate(lambda: paramiko.SFTPServer.set_file_attr(self.path(path), attr))
 
     def remove(self, path):
         return self.mutate(lambda: self.path(path).unlink())
@@ -113,8 +143,24 @@ class Server(paramiko.ServerInterface):
     def check_auth_password(self, username, password):
         return paramiko.AUTH_SUCCESSFUL if (username, password) == ("test", "test-password") else paramiko.AUTH_FAILED
 
+    def check_auth_publickey(self, username, key):
+        if username == "mfa-key" and key.get_base64() == self.client_public_key:
+            self.key_verified = True
+            return paramiko.AUTH_PARTIALLY_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
     def get_allowed_auths(self, username):
-        return "password"
+        if username == "mfa-key" and not getattr(self, "key_verified", False):
+            return "publickey"
+        return "keyboard-interactive" if username in ["mfa", "mfa-key"] else "password"
+
+    def check_auth_interactive(self, username, submethods):
+        if username not in ["mfa", "mfa-key"] or (username == "mfa-key" and not getattr(self, "key_verified", False)):
+            return paramiko.AUTH_FAILED
+        return paramiko.InteractiveQuery("MFA", "Two factors required", ("Password:", False), ("One-time code:", False))
+
+    def check_auth_interactive_response(self, responses):
+        return paramiko.AUTH_SUCCESSFUL if responses == ["test-password", "123456"] else paramiko.AUTH_FAILED
 
     def check_channel_request(self, kind, channel_id):
         return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
@@ -145,7 +191,10 @@ class Server(paramiko.ServerInterface):
             except (OSError, EOFError):
                 process.terminate()
             finally:
-                channel.close()
+                try:
+                    channel.close()
+                except (OSError, EOFError):
+                    pass
 
         threading.Thread(target=run, daemon=True).start()
         return True
@@ -196,11 +245,14 @@ def main():
         (root / "folder").mkdir()
         with zipfile.ZipFile(root / "sample.zip", "w") as archive:
             archive.writestr("inside.txt", "archive payload")
+        (root / "sample.rar").write_bytes((project / "tests/fixtures/tree.rar").read_bytes())
         auth = DummyAuthorizer()
         auth.add_user("test", "test-password", str(root), perm="elradfmwMT")
         TestFTPHandler.authorizer = auth
         ftp = FTPServer(("127.0.0.1", 0), TestFTPHandler)
         threading.Thread(target=ftp.serve_forever, kwargs={"timeout": 0.1}, daemon=True).start()
+        client_key = paramiko.RSAKey.generate(2048)
+        Server.client_public_key = client_key.get_base64()
         host_key = paramiko.RSAKey.generate(2048)
         ssh, transports = ssh_server(root, host_key)
         port = ssh.getsockname()[1]
@@ -208,15 +260,19 @@ def main():
         helper_port = helper.getsockname()[1]
         home = tmp / "home"
         (home / ".ssh").mkdir(parents=True)
+        client_key.write_private_key_file(str(home / ".ssh/id_rsa"))
         (home / ".ssh/known_hosts").write_text(f"[127.0.0.1]:{helper_port} {host_key.get_name()} {host_key.get_base64()}\n[127.0.0.1]:{port} {host_key.get_name()} {host_key.get_base64()}\n[localhost]:{port} {host_key.get_name()} {paramiko.RSAKey.generate(2048).get_base64()}\n")
         unknown, unknown_transports = ssh_server(root, host_key)
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), MC_TEST_FTP=f"ftp://test@127.0.0.1:{ftp.address[1]}/", MC_TEST_SFTP=f"sftp://test@127.0.0.1:{port}{root}/", MC_TEST_SSH=f"ssh://test@127.0.0.1:{helper_port}{root}/", MC_TEST_UNKNOWN_SSH=f"ssh://test@127.0.0.1:{unknown.getsockname()[1]}/", MC_TEST_CHANGED_SSH=f"ssh://test@localhost:{port}/")
+        env["MC_TEST_MFA"] = f"ssh://mfa@127.0.0.1:{helper_port}{root}/"
         env.pop("SSH_AUTH_SOCK", None)
         try:
-            subprocess.run([executable, "--ignored", "--nocapture", "--test-threads=1"], env=env, check=True, timeout=180)
+            subprocess.run([executable, "remote_server_contracts", "--ignored", "--nocapture", "--test-threads=1"], env=env, check=True, timeout=180)
             assert not list(root.rglob(".mc-upload-*")), "staging files leaked"
+            assert TestFTPHandler.lost_renames == 1, "Unconfirmed rename was retried"
             TestFTPHandler.machine_listings = False  # Exercise legacy LIST fallback through the TUI.
             subprocess.run([sys.executable, str(project / "tests/remote_terminal.py")], env=env, check=True, timeout=90)
+            subprocess.run([sys.executable, str(project / "tests/jobs_terminal.py")], env=env, check=True, timeout=120)
         finally:
             ftp.close_all()
             ssh.close()

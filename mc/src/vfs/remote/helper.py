@@ -24,7 +24,7 @@ def request():
 def metadata(path, follow=False):
     s = os.stat(path, follow_symlinks=follow)
     kind = "directory" if stat.S_ISDIR(s.st_mode) else "file" if stat.S_ISREG(s.st_mode) else "symlink" if stat.S_ISLNK(s.st_mode) else "special"
-    return dict(kind=kind, size=s.st_size, modified=max(0, int(s.st_mtime)))
+    return dict(kind=kind, size=s.st_size, modified=max(0, int(s.st_mtime)), mode=stat.S_IMODE(s.st_mode))
 
 
 def main():
@@ -32,6 +32,13 @@ def main():
     op, path = r["op"], r["path"]
     if op == "metadata":
         reply(metadata(path, r["follow"]))
+    elif op == "list_stream":
+        with os.scandir(path) as listing:
+            for i, entry in enumerate(listing):
+                if i >= 100000:
+                    raise ValueError("Remote directory exceeds 100,000 entries")
+                reply(dict(name=entry.name, **metadata(entry.path)))
+        reply(None)
     elif op == "list":
         entries = []
         with os.scandir(path) as listing:
@@ -44,6 +51,11 @@ def main():
         reply(os.path.realpath(path))
     elif op == "readlink":
         reply(os.readlink(path))
+    elif op == "set_metadata":
+        os.utime(path, (r["modified"], r["modified"]), follow_symlinks=False)
+        if r.get("mode") is not None:
+            os.chmod(path, r["mode"] & 0o777)
+        reply(None)
     elif op == "mkdir":
         os.mkdir(path)
         reply(None)
@@ -68,11 +80,13 @@ def main():
         fd, stage = tempfile.mkstemp(prefix=".mc-upload-", dir=os.path.dirname(path))
         try:
             with os.fdopen(fd, "wb") as f:
-                reply(None)
+                reply(stage)
                 while True:
                     chunk = request()
                     if "commit" in chunk:
                         f.flush()
+                        if os.fstat(f.fileno()).st_size != chunk["size"]:
+                            raise ValueError("Incomplete SSH upload; destination was not published")
                         os.fsync(f.fileno())
                         break
                     length = chunk["write"]
@@ -85,6 +99,8 @@ def main():
                     reply(None)
             if chunk.get("modified") is not None:
                 os.utime(stage, (chunk["modified"], chunk["modified"]))
+            if chunk.get("mode") is not None:
+                os.chmod(stage, chunk["mode"] & 0o777)
             if r["overwrite"]:
                 os.replace(stage, path)
             else:

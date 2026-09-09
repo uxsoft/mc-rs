@@ -1,7 +1,7 @@
 # mc — implementation plan and session handoff
 
-Last updated: 2026-09-08
-Current phase: VFS and lazy/password-protected archive migration complete and verified on Linux x64. M6 native verification outside Linux x64 remains pending.
+Last updated: 2026-09-09
+Current phase: Main proposals 3–7 implemented and verified on Linux x64; changes remain local. Published 0.2.6 and all four native CI build/test jobs verified. Interactive remote runtime coverage outside Linux x64 remains pending.
 
 ## Working agreement
 
@@ -123,7 +123,7 @@ Select exact dependency versions during implementation from current official doc
 - [x] Record user requirements, explicit exclusions, and implementation defaults.
 - [x] Inspect starter package and write this resumable plan.
 
-### M1 — Foundation and platform feasibility (implemented; native matrix pending)
+### M1 — Foundation and platform feasibility (implemented; native CI verified)
 
 - [x] Add Ratatui and terminal lifecycle management; retain binary name `mc`.
 - [x] Create testable application/action structure and restrained dark dual-panel layout.
@@ -193,7 +193,7 @@ Acceptance: representative fixtures for all five formats pass; archive traversal
 - [ ] Stress-test large directories and active-job shutdown interactively.
 - [ ] Validate native behavior for Linux x64/ARM64, macOS ARM64, and Windows x64, recording any unavailable platform as unverified.
 - [x] Provide installation/build instructions, supported behavior, shortcuts, and known limitations.
-- [ ] Build release artifacts for the four targets.
+- [x] Build release artifacts for the four targets (CI run 6, 0.2.6).
 
 Acceptance: browsing/copying/moving/deleting and required archives are usable, checks are recorded, and platform limitations are explicit. Publishing artifacts is a separate action from preparing them.
 
@@ -263,10 +263,10 @@ crates.io publishing follow-up:
 - `trash` 5.2.8 supplies Freedesktop trash, macOS trash, and Windows Recycle Bin implementations. Linux trash behavior is exercised in an isolated test environment. No permanent-delete fallback exists.
 - Editor fallback is `vi` on Unix and `notepad` on Windows; VISUAL/EDITOR arguments use word parsing, never shell evaluation.
 - Filename search uses case-insensitive substrings. Selection uses case-sensitive `*`/`?` wildcards, selecting files by default. Quick search supports wildcard prefixes and next-match cycling.
-- Archive VFS migration supersedes full extraction: metadata indexes plus bounded streams, password UI, and session credentials. Archive writing and multipart support remain excluded. Nested mounts require a seekable source; archive member streams currently do not expose seeking. RAR decoder requires local transport. See `VFS.md` for bounds and remaining limitations.
-- Copies preserve ordinary permissions but not timestamps, ownership, ACLs, extended attributes, sparse layout, or hard-link relationships. Windows symlink creation depends on OS privileges; replacing a symlink may fail safely.
+- Archive VFS migration supersedes full extraction: metadata indexes plus bounded streams, password UI, and session credentials. Archive writing and multipart support remain excluded. Nested mounts use memory-only seek caches capped at 64 MiB per member, with eight levels; remote/nonlocal RAR uses a bounded 64 MiB owned input. Larger inputs must be copied locally. See `VFS.md` for bounds and remaining limitations.
+- Copies preserve modification times and ordinary native permissions on local and SSH/SFTP destinations; Unix mode mapping requires a Unix client. FTP MFMT preserves regular-file times when advertised, not directory times/permissions. Archive adapters retain available stored timestamps/modes. Ownership, ACLs, extended attributes, special permission bits, sparse layout, and hard-link relationships remain unsupported. Windows symlink creation depends on OS privileges; replacing a symlink may fail safely.
 - Cancellation is cooperative and does not roll back completed items. OS trash calls cannot be cancelled mid-call. Jobs are not persisted across application exit.
-- Listing workers deliver full snapshots; no filesystem watcher. Superseded receivers are discarded, preventing stale results from replacing current navigation.
+- Listing workers deliver bounded incremental batches. Idle local/remote panels refresh periodically; selection, jobs, and modal work pause automatic refresh. Superseded receivers are discarded. There is no filesystem watcher.
 - The UI uses fixed supported MC shortcuts. Omitted upstream features (shell, internal viewer/editor, customization) have no substitute shortcut actions. This does not claim full upstream MC parity.
 
 ### Validation actually completed
@@ -282,10 +282,10 @@ crates.io publishing follow-up:
 ## Next session
 
 1. Read this plan and README; inspect current changes before editing.
-2. Run the configured native CI matrix when repository hosting/runners are available. Resolve any macOS/Windows build, libarchive linking, trash, or terminal differences. Do not mark those platforms verified until actual results exist.
-3. Complete M6 native runtime checks and artifact generation for Linux ARM64, macOS ARM64, and Windows x64. Private repositories may need a different ARM runner entitlement/label.
+2. Review the local transfer-hardening and proposals 3–7 changes and their validation entries below before committing/pushing. CI run 6 has verified the prior remote implementation on all four native build/test targets and published 0.2.6; the new checks still need hosted execution after pushing.
+3. Complete M6 interactive runtime checks for Linux ARM64, macOS ARM64, and Windows x64. Build/test success and artifacts are verified; remote terminal behavior outside Linux x64 is not.
 4. Exercise larger real-world directories and archives interactively; expand tests only for failures or unresolved concerns. Audit the supported shortcut subset against the manual as functionality expands.
-5. Exercise the new remote providers against real servers and native clients. Follow `VFS.md` for protocol guarantees; future work includes reconnect/resume, remote RAR transport, seekable archive member handles, incremental indexing, metadata preservation, and improved per-job controls.
+5. Main proposals 3–7 are implemented; review the newest validation entry below. Next candidates are interactive remote checks on other native clients, system/full SSH config semantics and certificates, byte-level transfer resume, incremental archive indexing, and large archives beyond the bounded cache. Optional FTPS, remote editing and bookmarks have not been implemented.
 
 Run locally from the repository root:
 
@@ -293,7 +293,7 @@ Run locally from the repository root:
 cargo run --manifest-path mc/Cargo.toml --release -- /left/directory /right/directory
 ```
 
-Deferred backlog: FTPS, SSH config/ProxyJump/MFA, reconnect/resume, remote RAR transport, and stronger FTP publication guarantees; archive creation/modification only if requested later.
+Deferred backlog: FTPS, remote editing/bookmarks, complete/system SSH config and certificate support, byte-level transfer resume, remote/nested RAR beyond 64 MiB, and stronger FTP publication guarantees. Archive creation/modification only if requested later.
 
 2026-09-08 — GitHub publication:
 - User authorized publishing the project to https://github.com/uxsoft/mc-rs.git. The destination has no existing branch refs.
@@ -349,3 +349,32 @@ Deferred backlog: FTPS, SSH config/ProxyJump/MFA, reconnect/resume, remote RAR t
 - Added loopback FTP and SSH integration fixtures, with separate SFTP and SSH-without-SFTP endpoints and isolated HOME/known_hosts. Tests cover seeking, retained handles, staged abort/commit, conflict preservation, recursive upload/move/delete, remote ZIP, and unknown/changed host-key rejection. Remote PTY flows cover startup, masked incorrect-password retry, selection/sizing, cat, copy, and clean exit; FTP PTY disables MLSD to exercise LIST fallback.
 - Validation passed on Linux x64: 33 standard Rust tests plus the separate remote-server contract test, all three remote PTY flows, both existing local/archive PTY suites, strict Clippy, formatting, release build, package-content checks (including helper.py), Python syntax, workflow YAML, and diff checks. Native remote runtime verification for Linux ARM64/macOS/Windows remains pending.
 - Linux x64 CI now runs the remote fixtures after installing test-only Python dependencies. Added explicit Linux OpenSSL development and macOS openssl@3 build setup/cache identity. Updated README build/connection instructions and VFS architecture. No commit or publication was performed for this change.
+
+
+2026-09-09 — release verification and remote transfer hardening:
+- Scope authorized by “go for it”: verify release/install, then harden remote transfers before expanding features.
+- Verified GitHub Actions run 34316119517 (run number 6, commit cf1fb20d7ba4871711eb76d6148ba4767d73fd07): Linux x64/ARM64, macOS ARM64, Windows x64 native jobs and crates.io publishing succeeded. crates.io 0.2.6 package VCS metadata matches that commit. This supersedes earlier “native matrix unverified” notes for build/test/artifact coverage; interactive remote runtime coverage remains Linux x64 only.
+- Installed the actual published crate into disposable mise data/config/cache/state directories. `MISE_CARGO_BINSTALL=false mise install cargo:mc-rs@0.2.6` succeeded and `mise exec cargo:mc-rs@0.2.6 -- mc --version` returned `mc 0.2.6`. Default binstall lookup stalled on unavailable GitHub release binaries/rate-limited requests; documented source installation. The user's global mise installation/configuration was not changed.
+- Workers reject mismatched source byte counts for transfers involving remote providers. FTP/SFTP/SSH staged writers verify expected and server-stored lengths before publication. Existing targets and move sources survive incomplete transfers. Size checks do not detect same-size edits or corruption.
+- Remote write handles expose credential-free staging locations for failure diagnostics. Lost publication replies explicitly report an uncertain outcome and require destination inspection before a manual retry; mutations are never automatically replayed.
+- Added injected early EOF/connection-reset move coverage, FTP/SFTP server-side truncation, short-write rejection on all protocols, and an FTP rename that succeeds but loses its reply. Tests assert preservation, cleanup, and exactly one rename attempt.
+- Added a disposable unprivileged OpenSSH daemon fixture with isolated known_hosts/client keys/shell configuration. Real OpenSSH 9.6p1 verified key authentication, SFTP overwrite refusal without deleting the old target, SSH atomic replacement, and short-upload cleanup. A local Fish startup utility consumed stdin; isolated test startup and documented that noninteractive SSH helper shells must not read stdin or write stdout. Diagnostics now explain this requirement; no user shell or system SSH configuration was changed.
+- Linux x64 CI now installs openssh-server and runs the additional OpenSSH fixture after the existing remote fixtures. Validation passed: 34 standard Rust tests, both remote protocol contract tests (FTP/Paramiko and real OpenSSH), three remote PTY flows, local/archive terminal suites against the release binary, release build, formatting, strict Clippy, five version-script tests, Python syntax/workflow checks, and diff review. New CI steps still need hosted execution after pushing.
+- Work remains local; no commit, push, or new crate publication has been performed in this session.
+
+
+2026-09-09 — remaining proposals:
+- User authorized the remaining five main proposals: SSH connections, job controls, metadata, large directories, and remote/nested archives. Optional FTPS, remote editing, and bookmarks are separate follow-ups.
+- Implemented non-executing SSH Host/Include/HostName/User/Port/IdentityFile/IdentitiesOnly/StrictHostKeyChecking/ProxyJump configuration, owned bounded jump tunnels, custom/encrypted keys, masked keyboard-interactive challenges, and session-only unknown-host SHA256 confirmation. Changed keys remain rejected. StrictHostKeyChecking yes forbids unknown-host confirmation. Config Match/executable proxies/custom trust files and certificates are explicitly unsupported; system configuration is not read.
+- Implemented selectable job controls, per-job cancellation, per-file progress/speed/ETA, and explicit failed-job retry with fresh SSH sessions and remaining top-level sources. Conflicts ask again; no mutation is retried automatically.
+- Implemented local timestamps, SSH/SFTP timestamps and ordinary Unix permissions, plus FTP MFMT for regular files when advertised. The real FTP fixture rejects MFMT on directories; directory times and modes are explicitly unsupported there. ZIP/tar/7z/RAR adapters retain available timestamps/modes, with local-time interpretation and format precision for DOS timestamps. Incremental bounded panel batches use provider listing callbacks; directory sizing reuses listing metadata. Idle panels refresh periodically and sorting caches keys.
+- Implemented memory-only bounded seeking for archive members, enabling nested mounts, and bounded remote/nonlocal RAR reads. Limit: 64 MiB per cached member/nonlocal RAR, eight nested mounts. No extracted browsing tree or plaintext temporary files.
+- Acceptance tests pass for local and archive metadata, restart/conflict decisions, encrypted nested ZIP/RAR, cache bounds/cancellation, and listing batches arriving before enumeration finishes. Real OpenSSH verifies aliases/custom keys, encrypted-key passphrases, ProxyJump, and staged operations. Paramiko verifies keyboard-interactive MFA, session-only host trust/strict rejection, and protocol failure cases; combined public-key-plus-MFA authentication also passes.
+- Terminal verification passes for local/archive workflows, all three remote workflows, and selected-job cancellation/retry with independent simultaneous jobs against a throttled SFTP server. Added jobs_terminal.py to the Linux x64 server fixture. Large-directory PTY passes with 20,000 entries: first observed filename 0.11 s, external-change refresh 4.33 s on this Linux x64 host outside filesystem mediation. These are single-run observations, not a cross-platform performance guarantee. The first stress assertion incorrectly searched for a complete filename in differential terminal output; corrected it to observe an entry, then request a full redraw for final count.
+- Added large_directory.py to Linux native CI. README/VFS describe keys, trust rules, retry semantics, cache bounds, metadata precision, refresh intervals and unsupported options. Kept the user's separate README deletions from the prior turn.
+- Final validation passed: 41 standard Rust tests; separate FTP/Paramiko and OpenSSH contract suites; local/archive, three remote, job-control, and 20,000-entry terminal suites; strict Clippy; formatting; release build; five CI version tests; Python syntax/workflow validation; package-content and diff checks. Tested OpenSSH aliases, plain/encrypted custom keys and ProxyJump, plus standalone and public-key-plus-MFA. New hosted/native-client runs are pending a push; changes remain uncommitted.
+
+2026-09-09 — diagnose file icon font fallback:
+- Investigated folders rendering correctly while some file icons resemble Chinese characters. On this host, Fontconfig resolves monospace U+F07B (folder) to CaskaydiaMono Nerd Font, but U+E7A8 (Rust) and U+E73C (Python) to AR PL UMing HK. The local Alacritty config has no explicit font family. This reproduces a matching fallback issue; the user's affected terminal is not yet confirmed.
+- Verified that explicitly selecting the installed CaskaydiaMono Nerd Font Mono resolves all 27 application glyphs to that family in both regular and bold styles. The codepoints use the documented Nerd Fonts Font Awesome and Devicons ranges; retained the existing icons.
+- Added README troubleshooting and an Alacritty font selection example; validated the proposed TOML against the existing config without modifying it. Actual terminal rendering still needs user verification. No application code or user terminal settings changed.

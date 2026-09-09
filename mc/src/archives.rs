@@ -106,9 +106,56 @@ fn builder(
     }
     Ok(b.build()?)
 }
+fn read_rar(source: &VfsPath, password: Option<&str>, ctx: &Context) -> Result<rars::Archive> {
+    if let Some(local) = source.local_path() {
+        return Ok(rars::ArchiveReader::read_path_with_options(
+            local,
+            rar_options(password),
+        )?);
+    }
+    let size = source.metadata(true, ctx)?.size;
+    ensure!(
+        size <= vfs::cache::LIMIT,
+        "Remote/nested RAR cache limit is 64 MiB; copy the archive locally to open it"
+    );
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut input = source.fs.open_read(&source.path, ctx)?;
+    let mut chunk = [0; 65536];
+    loop {
+        ctx.check()?;
+        let n = input.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        ensure!(
+            (bytes.len() + n) as u64 <= vfs::cache::LIMIT,
+            "RAR cache exceeds 64 MiB"
+        );
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    ensure!(bytes.len() as u64 == size, "RAR source size changed");
+    Ok(rars::ArchiveReader::read_owned_with_options(
+        bytes,
+        rar_options(password),
+    )?)
+}
 fn rar_options(password: Option<&str>) -> rars::ArchiveReadOptions<'_> {
     rars::ArchiveReadOptions::with_optional_password(password.map(str::as_bytes))
         .with_rar50_buffered_decode_limit(32 * 1024 * 1024)
+}
+fn dos_time(time: zip::DateTime) -> SystemTime {
+    use chrono::TimeZone;
+    chrono::NaiveDate::from_ymd_opt(time.year() as i32, time.month() as u32, time.day() as u32)
+        .and_then(|d| {
+            d.and_hms_opt(
+                time.hour() as u32,
+                time.minute() as u32,
+                time.second() as u32,
+            )
+        })
+        .and_then(|d| chrono::Local.from_local_datetime(&d).earliest())
+        .map(SystemTime::from)
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 fn headers(
     source: &VfsPath,
@@ -117,7 +164,12 @@ fn headers(
     ctx: &Context,
 ) -> Result<Vec<(String, Metadata)>> {
     let mut entries = vec![];
-    let mut add = |name: String, directory: bool, size: u64, modified: SystemTime| -> Result<()> {
+    let mut add = |name: String,
+                   directory: bool,
+                   size: u64,
+                   modified: SystemTime,
+                   mode: Option<u32>|
+     -> Result<()> {
         ctx.check()?;
         ensure!(
             entries.len() < 1_000_000,
@@ -133,7 +185,7 @@ fn headers(
                 },
                 size,
                 modified,
-                permissions: None,
+                permissions: mode_permissions(mode),
             },
         ));
         Ok(())
@@ -154,7 +206,10 @@ fn headers(
                     e.name().to_owned(),
                     e.is_dir(),
                     e.size(),
-                    SystemTime::UNIX_EPOCH,
+                    e.last_modified()
+                        .map(dos_time)
+                        .unwrap_or(SystemTime::UNIX_EPOCH),
+                    e.unix_mode(),
                 )?;
             }
         }
@@ -173,7 +228,12 @@ fn headers(
                     .into_owned(),
                 false,
                 size,
-                SystemTime::UNIX_EPOCH,
+                input
+                    .header()
+                    .filter(|h| h.mtime() != 0)
+                    .map(|h| SystemTime::UNIX_EPOCH + Duration::from_secs(h.mtime() as u64))
+                    .unwrap_or(source.metadata(true, ctx)?.modified),
+                None,
             )?;
         }
         Driver::SevenZip => {
@@ -194,14 +254,17 @@ fn headers(
                     e.name.clone(),
                     e.is_directory,
                     e.size,
-                    SystemTime::UNIX_EPOCH,
+                    if e.has_last_modified_date {
+                        e.last_modified_date.into()
+                    } else {
+                        SystemTime::UNIX_EPOCH
+                    },
+                    (e.windows_attributes >> 16 != 0).then_some(e.windows_attributes >> 16),
                 )?;
             }
         }
         Driver::Rar => {
-            let local=source.local_path().ok_or_else(||anyhow::anyhow!("This RAR decoder requires a local archive; remote seekable RAR transport is not implemented yet"))?;
-            let archive =
-                rars::ArchiveReader::read_path_with_options(local, rar_options(password))?;
+            let archive = read_rar(source, password, ctx)?;
             if let Some(rar) = archive.as_rar50() {
                 ensure!(
                     rar.files().all(|f| f.redirection.is_none()),
@@ -222,7 +285,15 @@ fn headers(
                     String::from_utf8(e.name)?,
                     e.is_directory,
                     e.unpacked_size,
-                    SystemTime::UNIX_EPOCH,
+                    e.file_time
+                        .and_then(|t| {
+                            zip::DateTime::try_from_msdos((t >> 16) as u16, t as u16).ok()
+                        })
+                        .map(dos_time)
+                        .unwrap_or(SystemTime::UNIX_EPOCH),
+                    ((e.family == rars::ArchiveFamily::Rar50Plus && e.host_os == Some(1))
+                        || (e.family == rars::ArchiveFamily::Rar15To40 && e.host_os == Some(3)))
+                    .then_some(e.file_attr as u32),
                 )?;
             }
         }
@@ -233,7 +304,8 @@ fn headers(
                 match item {
                     ArchiveContents::StartOfEntry(name, stat) => {
                         #[allow(clippy::unnecessary_cast)]
-                        let kind = stat.st_mode as u32 & 0o170000;
+                        let mode = stat.st_mode as u32;
+                        let kind = mode & 0o170000;
                         ensure!(
                             matches!(kind, 0o040000 | 0o100000),
                             "Archive contains an unsupported link or special file: {name}"
@@ -241,7 +313,13 @@ fn headers(
                         let modified = SystemTime::UNIX_EPOCH
                             .checked_add(Duration::from_secs(stat.st_mtime.max(0) as u64))
                             .unwrap_or(SystemTime::UNIX_EPOCH);
-                        add(name, kind == 0o040000, stat.st_size.max(0) as u64, modified)?;
+                        add(
+                            name,
+                            kind == 0o040000,
+                            stat.st_size.max(0) as u64,
+                            modified,
+                            Some(mode),
+                        )?;
                     }
                     ArchiveContents::Err(e) => return Err(e.into()),
                     _ => {}
@@ -253,6 +331,10 @@ fn headers(
     Ok(entries)
 }
 pub fn open(source: VfsPath, ctx: &Context, progress: impl Fn(u64)) -> Result<VfsPath> {
+    ensure!(
+        source.fs.backing_resources().len() < 8,
+        "Nested archives are limited to 8 levels"
+    );
     let name = source.path.to_string_lossy().to_lowercase();
     let driver = if name.ends_with(".zip") {
         Driver::Zip
@@ -426,12 +508,7 @@ fn decode(
             ensure!(found, "Archive member disappeared");
         }
         Driver::Rar => {
-            let archive = rars::ArchiveReader::read_path_with_options(
-                source
-                    .local_path()
-                    .ok_or_else(|| anyhow::anyhow!("RAR requires local transport"))?,
-                rar_options(password),
-            )?;
+            let archive = read_rar(source, password, ctx)?;
             let mut found = false;
             let mut stopped = false;
             // Stop at the next header, after the selected member's checksum was checked.
@@ -485,6 +562,24 @@ fn decode(
     Ok(())
 }
 impl FileSystem for Archive {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            seek: true,
+            ..Default::default()
+        }
+    }
+    fn open_seek(&self, p: &Path, ctx: &Context) -> Result<Box<dyn ReadSeek>> {
+        let size = self.metadata(p, false, ctx)?.size;
+        ensure!(
+            size <= vfs::cache::LIMIT,
+            "Archive seek cache limit is 64 MiB per member; copy this archive locally to open it"
+        );
+        Ok(Box::new(vfs::cache::SeekCache::new(
+            self.open_read(p, ctx)?,
+            size,
+            ctx.clone(),
+        )?))
+    }
     fn id(&self) -> String {
         self.id.clone()
     }

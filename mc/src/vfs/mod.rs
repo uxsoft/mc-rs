@@ -1,5 +1,6 @@
 //! Backend-dispatched filesystem operations, inspired by MC's vfs_class/vfs_path_t.
 //! Provider-relative paths never masquerade as OS paths. Open handles own their sessions.
+pub mod cache;
 pub mod local;
 pub mod remote;
 use anyhow::{Result, bail};
@@ -23,6 +24,7 @@ pub type Secret = Zeroizing<String>;
 pub struct AuthRequest {
     pub resource: String,
     pub retry: bool,
+    pub confirmation: bool,
     pub cancel: Arc<AtomicBool>,
     pub reply: mpsc::SyncSender<Option<Secret>>,
 }
@@ -45,6 +47,9 @@ impl Context {
         Ok(())
     }
     pub fn password(&self, resource: &str, retry: bool) -> Result<Secret> {
+        self.prompt(resource, retry, false)
+    }
+    pub fn prompt(&self, resource: &str, retry: bool, confirmation: bool) -> Result<Secret> {
         self.check()?;
         let sender = self
             .auth
@@ -54,6 +59,7 @@ impl Context {
         sender.send(AuthRequest {
             resource: resource.into(),
             retry,
+            confirmation,
             cancel: self.cancel.clone(),
             reply,
         })?;
@@ -108,6 +114,10 @@ impl<T: Read + Seek + Send> ReadSeek for T {}
 /// A staged destination handle; dropping it aborts an incomplete copy.
 pub trait WriteHandle: Write + Send {
     fn commit(self: Box<Self>, metadata: &Metadata) -> Result<()>;
+    /// Credential-free location for recovery if remote cleanup cannot finish.
+    fn staging_location(&self) -> Option<String> {
+        None
+    }
 }
 pub trait FileSystem: Send + Sync {
     /// Stable session/backend identity, excluding credentials.
@@ -118,6 +128,19 @@ pub trait FileSystem: Send + Sync {
     }
     fn metadata(&self, path: &Path, follow: bool, ctx: &Context) -> Result<Metadata>;
     fn read_dir(&self, path: &Path, ctx: &Context) -> Result<Vec<DirEntry>>;
+    /// Stream listing metadata without requiring a complete provider snapshot.
+    fn visit_dir(
+        &self,
+        path: &Path,
+        ctx: &Context,
+        emit: &mut dyn FnMut(DirEntry) -> Result<()>,
+    ) -> Result<()> {
+        for entry in self.read_dir(path, ctx)? {
+            ctx.check()?;
+            emit(entry)?;
+        }
+        Ok(())
+    }
     fn open_read(&self, path: &Path, ctx: &Context) -> Result<Box<dyn Read + Send>>;
     fn open_seek(&self, _path: &Path, _ctx: &Context) -> Result<Box<dyn ReadSeek>> {
         bail!("Seekable reads unsupported by this filesystem")
@@ -164,6 +187,9 @@ pub trait FileSystem: Send + Sync {
     /// UI-safe lock identity. Remote providers lock their endpoint conservatively.
     fn lock_path(&self, path: &Path) -> PathBuf {
         self.canonical(path).unwrap_or_else(|_| path.to_owned())
+    }
+    fn reconnect(&self, _ctx: &Context) -> Result<Option<Arc<dyn FileSystem>>> {
+        Ok(None)
     }
     fn is_remote(&self) -> bool {
         false
@@ -398,4 +424,31 @@ pub fn copy_stream(
         progress(n as u64);
     }
     Ok(())
+}
+
+/// Portable metadata carries native permissions; Unix clients preserve ordinary
+/// mode bits across Unix providers, never setuid/setgid/sticky bits.
+pub fn mode_permissions(mode: Option<u32>) -> Option<std::fs::Permissions> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        mode.map(|m| std::fs::Permissions::from_mode(m & 0o777))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        None
+    }
+}
+pub fn permission_mode(metadata: &Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions.as_ref().map(|p| p.mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }

@@ -34,9 +34,10 @@ impl Write for Staged {
 }
 impl WriteHandle for Staged {
     fn commit(self: Box<Self>, m: &Metadata) -> Result<()> {
-        if let Some(p) = &m.permissions {
-            self.file.as_file().set_permissions(p.clone())?;
+        if let Some(p) = mode_permissions(permission_mode(m)).or_else(|| m.permissions.clone()) {
+            self.file.as_file().set_permissions(p)?;
         }
+        self.file.as_file().set_modified(m.modified)?;
         self.file.as_file().sync_all()?;
         if self.overwrite {
             self.file.persist(&self.path)?;
@@ -70,19 +71,31 @@ impl FileSystem for Local {
     }
     fn read_dir(&self, p: &Path, ctx: &Context) -> Result<Vec<DirEntry>> {
         let mut entries = vec![];
+        self.visit_dir(p, ctx, &mut |e| {
+            entries.push(e);
+            Ok(())
+        })?;
+        Ok(entries)
+    }
+    fn visit_dir(
+        &self,
+        p: &Path,
+        ctx: &Context,
+        emit: &mut dyn FnMut(DirEntry) -> Result<()>,
+    ) -> Result<()> {
         for entry in fs::read_dir(p)? {
             ctx.check()?;
             let e = entry?;
             match fs::symlink_metadata(e.path()) {
-                Ok(m) => entries.push(DirEntry {
+                Ok(m) => emit(DirEntry {
                     name: e.file_name(),
                     metadata: Self::meta(m),
-                }),
+                })?,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(entries)
+        Ok(())
     }
     fn open_read(&self, p: &Path, _: &Context) -> Result<Box<dyn Read + Send>> {
         Ok(Box::new(fs::File::open(p)?))
@@ -151,8 +164,10 @@ impl FileSystem for Local {
         Ok(())
     }
     fn set_metadata(&self, p: &Path, m: &Metadata, _: &Context) -> Result<()> {
-        if let Some(perms) = &m.permissions {
-            fs::set_permissions(p, perms.clone())?;
+        filetime::set_file_mtime(p, filetime::FileTime::from_system_time(m.modified))?;
+        if let Some(perms) = mode_permissions(permission_mode(m)).or_else(|| m.permissions.clone())
+        {
+            fs::set_permissions(p, perms)?;
         }
         Ok(())
     }

@@ -89,6 +89,7 @@ pub struct App {
     pub menu_tabs: [ratatui::layout::Rect; 4],
     pub menu_area: ratatui::layout::Rect,
     pub jobs: Vec<Job>,
+    pub job_cursor: usize,
     pub search: Option<Search>,
     pub archive: Option<ArchiveTask>,
     pub status: String,
@@ -126,6 +127,7 @@ impl App {
             menu_tabs: Default::default(),
             menu_area: Default::default(),
             jobs: vec![],
+            job_cursor: 0,
             search: None,
             archive: None,
             status: "Ready · Alt+? find files · F9 menu".into(),
@@ -215,7 +217,18 @@ impl App {
                 value: Secret::new(String::with_capacity(256)),
             });
         }
+        let auto_refresh = !self.busy()
+            && self.dialog.is_none()
+            && self.password.is_none()
+            && self.connecting.is_none()
+            && self.archive.is_none()
+            && self.viewing.is_none()
+            && self.search.is_none()
+            && self.menu.is_none();
         for p in &mut self.panels {
+            if auto_refresh {
+                p.auto_refresh();
+            }
             p.poll();
         }
         for job in &mut self.jobs {
@@ -688,7 +701,10 @@ impl App {
                     menu::Action::Find => {
                         self.input(Purpose::Search, "Find filename (substring)", String::new())
                     }
-                    menu::Action::Jobs => self.dialog = Some(Dialog::Jobs),
+                    menu::Action::Jobs => {
+                        self.job_cursor = self.jobs.len().saturating_sub(1);
+                        self.dialog = Some(Dialog::Jobs);
+                    }
                 }
             }
             _ => {}
@@ -737,16 +753,52 @@ impl App {
                     return Ok(());
                 }
             }
-            Dialog::Jobs => {
-                if k.code == K::Char('c') {
-                    for j in &self.jobs {
+            Dialog::Jobs => match k.code {
+                K::Up => self.job_cursor = self.job_cursor.saturating_sub(1),
+                K::Down => {
+                    self.job_cursor = (self.job_cursor + 1).min(self.jobs.len().saturating_sub(1))
+                }
+                K::Home => self.job_cursor = 0,
+                K::End => self.job_cursor = self.jobs.len().saturating_sub(1),
+                K::Char('c') => {
+                    if let Some(j) = self.jobs.get(self.job_cursor) {
                         j.cancel.store(true, Ordering::Relaxed);
                     }
                 }
-                if k.code == K::Enter {
-                    return Ok(());
+                K::Char('r') => {
+                    if let Some(j) = self.jobs.get(self.job_cursor) {
+                        let p = j.progress.lock().unwrap();
+                        let failed = p.done && p.error.is_some();
+                        drop(p);
+                        if failed {
+                            let remaining = j
+                                .sources
+                                .iter()
+                                .skip(j.progress.lock().unwrap().completed_sources)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let resources =
+                                jobs::resources(j.operation, &remaining, &j.destination);
+                            if !self.jobs.iter().any(|j| {
+                                !j.progress.lock().unwrap().done
+                                    && jobs::overlaps(&resources, &j.resources)
+                            }) {
+                                let next = jobs::retry(
+                                    j,
+                                    Context {
+                                        auth: Some(self.auth_tx.clone()),
+                                        ..Default::default()
+                                    },
+                                );
+                                self.jobs.push(next);
+                                self.job_cursor = self.jobs.len() - 1;
+                            }
+                        }
+                    }
                 }
-            }
+                K::Enter => return Ok(()),
+                _ => {}
+            },
             Dialog::Quit => {
                 if k.code == K::Enter {
                     for j in &self.jobs {
@@ -1040,17 +1092,43 @@ impl App {
             return Ok(());
         }
         if self.dialog.is_some() {
+            if matches!(self.dialog, Some(Dialog::Jobs))
+                && inside
+                && matches!(
+                    m.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                )
+            {
+                return self.key(
+                    KeyEvent::new(
+                        if m.kind == MouseEventKind::ScrollUp {
+                            K::Up
+                        } else {
+                            K::Down
+                        },
+                        M::NONE,
+                    ),
+                    terminal,
+                );
+            }
             if click && inside {
                 let relative_x = m.column - area.x;
                 if m.row == area.bottom().saturating_sub(2) {
                     let code = match &self.dialog {
                         Some(Dialog::Message { .. }) => K::Esc,
-                        Some(Dialog::Jobs) if relative_x < 17 => K::Char('c'),
+                        Some(Dialog::Jobs) if relative_x < 12 => K::Char('c'),
+                        Some(Dialog::Jobs) if relative_x < 23 => K::Char('r'),
                         Some(Dialog::Jobs) => K::Esc,
                         _ if relative_x < 16 => K::Enter,
                         _ => K::Esc,
                     };
                     return self.key(KeyEvent::new(code, M::NONE), terminal);
+                }
+                if matches!(self.dialog, Some(Dialog::Jobs)) && m.row > area.y && m.row < area.y + 9
+                {
+                    self.job_cursor = ((self.job_cursor / 4) * 4
+                        + (m.row - area.y - 1) as usize / 2)
+                        .min(self.jobs.len().saturating_sub(1));
                 }
                 match self.dialog.as_mut().unwrap() {
                     Dialog::Delete { permanent } if m.row == area.y + 3 => {

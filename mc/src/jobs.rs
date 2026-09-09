@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Operation {
@@ -31,6 +31,9 @@ pub struct Conflict {
 #[derive(Default)]
 pub struct Progress {
     pub bytes: u64,
+    pub current_bytes: u64,
+    pub current_total: Option<u64>,
+    pub completed_sources: usize,
     pub files: u64,
     pub current: String,
     pub done: bool,
@@ -38,6 +41,10 @@ pub struct Progress {
     pub conflict: Option<Conflict>,
 }
 pub struct Job {
+    pub operation: Operation,
+    pub sources: Vec<VfsPath>,
+    pub destination: VfsPath,
+    pub started: Instant,
     pub resources: Vec<VfsPath>,
     pub title: String,
     pub progress: Arc<Mutex<Progress>>,
@@ -141,13 +148,37 @@ impl Worker {
             to.fs
                 .symlink(&target, &to.path, from.is_dir(), overwrite, &self.ctx)?;
         } else {
+            {
+                let mut p = self.progress.lock().unwrap();
+                p.current_bytes = 0;
+                p.current_total = Some(meta.size);
+            }
             let mut input = from.fs.open_read(&from.path, &self.ctx)?;
             let mut output = to.fs.create(&to.path, overwrite, &self.ctx)?;
-            copy_stream(&mut input, &mut output, &self.ctx, |n| {
-                self.progress.lock().unwrap().bytes += n
-            })?;
-            self.check()?;
-            output.commit(&meta)?;
+            let staging = output.staging_location();
+            let result = (|| {
+                let mut copied = 0;
+                copy_stream(&mut input, &mut output, &self.ctx, |n| {
+                    copied += n;
+                    let mut p = self.progress.lock().unwrap();
+                    p.bytes += n;
+                    p.current_bytes += n;
+                })?;
+                if from.fs.is_remote() || to.fs.is_remote() {
+                    anyhow::ensure!(
+                        copied == meta.size,
+                        "Source size changed during transfer: expected {} bytes, received {copied}. Destination was not published",
+                        meta.size
+                    );
+                }
+                self.check()?;
+                output.commit(&meta)
+            })();
+            if let Some(staging) = staging {
+                result.with_context(|| format!("Transfer failed; staging cleanup was attempted. If the connection failed, inspect {staging} for leftovers"))?;
+            } else {
+                result?;
+            }
         }
         self.progress.lock().unwrap().files += 1;
         Ok(true)
@@ -182,16 +213,34 @@ pub fn validate_destination(from: &VfsPath, to: &VfsPath) -> Result<()> {
     }
     Ok(())
 }
-pub fn start(
+pub fn start(op: Operation, sources: Vec<VfsPath>, destination: VfsPath, ctx: VfsContext) -> Job {
+    start_inner(op, sources, destination, ctx, false)
+}
+pub fn retry(job: &Job, ctx: VfsContext) -> Job {
+    let completed = job.progress.lock().unwrap().completed_sources;
+    start_inner(
+        job.operation,
+        job.sources.iter().skip(completed).cloned().collect(),
+        job.destination.clone(),
+        ctx,
+        true,
+    )
+}
+fn start_inner(
     op: Operation,
     sources: Vec<VfsPath>,
     destination: VfsPath,
     mut ctx: VfsContext,
+    reconnect: bool,
 ) -> Job {
     let progress = Arc::new(Mutex::new(Progress::default()));
     let cancel = Arc::new(AtomicBool::new(false));
     ctx.cancel = cancel.clone();
     let job = Job {
+        operation: op,
+        sources: sources.clone(),
+        destination: destination.clone(),
+        started: Instant::now(),
         resources: resources(op, &sources, &destination),
         title: format!("{op:?}"),
         progress: progress.clone(),
@@ -204,6 +253,17 @@ pub fn start(
             policy: None,
         };
         let result: Result<()> = (|| {
+            let reconnect_path = |p: &VfsPath| -> Result<VfsPath> {
+                if reconnect && let Some(fs) = p.fs.reconnect(&worker.ctx)? {
+                    return Ok(VfsPath::new(fs, p.path.clone()));
+                }
+                Ok(p.clone())
+            };
+            let sources = sources
+                .iter()
+                .map(reconnect_path)
+                .collect::<Result<Vec<_>>>()?;
+            let destination = reconnect_path(&destination)?;
             if matches!(op, Operation::Copy | Operation::Move | Operation::Mkdir)
                 && !destination.fs.capabilities().write
             {
@@ -247,7 +307,11 @@ pub fn start(
                                 .rename(&source.path, &target.path, &worker.ctx)
                                 .is_ok()
                         {
-                            progress.lock().unwrap().files += 1;
+                            {
+                                let mut p = progress.lock().unwrap();
+                                p.files += 1;
+                                p.completed_sources += 1;
+                            }
                             continue;
                         }
                         // Cross-device moves and merges copy first; incomplete copies never delete source data.
@@ -257,6 +321,7 @@ pub fn start(
                     }
                     Operation::Mkdir => unreachable!(),
                 }
+                progress.lock().unwrap().completed_sources += 1;
             }
             Ok(())
         })();

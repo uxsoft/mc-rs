@@ -1,4 +1,5 @@
 //! Remote mounts share VFS paths/handles with local and archive providers.
+mod config;
 mod ftp;
 mod ssh;
 
@@ -181,7 +182,16 @@ pub fn connect_path(value: &str, ctx: &Context) -> Result<VfsPath> {
     let path = endpoint.path.clone();
     let fs: Arc<dyn FileSystem> = match endpoint.protocol {
         Protocol::Ftp => Arc::new(ftp::Ftp::connect(endpoint, ctx)?),
-        _ => Arc::new(ssh::Ssh::connect(endpoint, ctx)?),
+        _ => {
+            let uri = Url::parse(value)?;
+            let config = config::Config::resolve(
+                endpoint,
+                !uri.username().is_empty(),
+                uri.port().is_some(),
+                &ssh::home()?,
+            )?;
+            Arc::new(ssh::Ssh::connect(config, ctx)?)
+        }
     };
     Ok(VfsPath::new(fs, path))
 }

@@ -36,9 +36,14 @@ fn context() -> Context {
     std::thread::spawn(move || {
         while let Ok(request) = rx.recv() {
             assert!(!request.resource.contains("test-password"));
-            let _ = request
-                .reply
-                .send(Some(Secret::new("test-password".into())));
+            let _ = request.reply.send(Some(Secret::new(
+                if request.resource.contains("One-time code") {
+                    "123456"
+                } else {
+                    "test-password"
+                }
+                .into(),
+            )));
         }
     });
     Context {
@@ -127,14 +132,49 @@ fn remote_server_contracts() {
         let metadata = Metadata {
             kind: Kind::File,
             size: 7,
-            modified: std::time::SystemTime::now(),
-            permissions: None,
+            modified: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000),
+            permissions: mc::vfs::mode_permissions(Some(0o640)),
         };
         let target = root.join("written space ' quote.txt");
         let mut writer = target.fs.create(&target.path, false, &ctx).unwrap();
         writer.write_all(b"payload").unwrap();
         assert!(target.metadata(false, &ctx).is_err());
         writer.commit(&metadata).unwrap();
+        let stored = target.metadata(false, &ctx).unwrap();
+        assert_eq!(
+            stored
+                .modified
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            1_600_000_000
+        );
+        if key != "MC_TEST_FTP" {
+            assert_eq!(
+                mc::vfs::permission_mode(&stored),
+                mc::vfs::permission_mode(&metadata)
+            );
+        }
+        let rar = mc::archives::open(root.join("sample.rar"), &ctx, |_| {}).unwrap();
+        let mut pending = vec![rar];
+        let mut count = 0;
+        while let Some(path) = pending.pop() {
+            for (p, m) in path.read_dir(&ctx).unwrap() {
+                if m.kind == Kind::Directory {
+                    pending.push(p);
+                } else {
+                    let mut bytes = vec![];
+                    p.fs.open_read(&p.path, &ctx)
+                        .unwrap()
+                        .read_to_end(&mut bytes)
+                        .unwrap();
+                    assert_eq!(bytes.len() as u64, m.size);
+                    count += 1;
+                }
+            }
+        }
+        assert!(count > 0);
+
         let mut data = String::new();
         target
             .fs
@@ -144,7 +184,7 @@ fn remote_server_contracts() {
             .unwrap();
         assert_eq!(data, "payload");
         let mut duplicate = target.fs.create(&target.path, false, &ctx).unwrap();
-        duplicate.write_all(b"bad").unwrap();
+        duplicate.write_all(b"badbad!").unwrap();
         assert!(duplicate.commit(&metadata).is_err());
         let mut data = String::new();
         target
@@ -158,6 +198,21 @@ fn remote_server_contracts() {
             "no-clobber must preserve existing contents"
         );
 
+        let mut short = target.fs.create(&target.path, true, &ctx).unwrap();
+        assert!(short.staging_location().is_some());
+        short.write_all(b"bad").unwrap();
+        assert!(
+            short.commit(&metadata).is_err(),
+            "Short upload must not replace an existing file"
+        );
+        let mut data = String::new();
+        target
+            .fs
+            .open_read(&target.path, &ctx)
+            .unwrap()
+            .read_to_string(&mut data)
+            .unwrap();
+        assert_eq!(data, "payload");
         let mut replacement = target.fs.create(&target.path, true, &ctx).unwrap();
         replacement.write_all(b"updated").unwrap();
         let result = replacement.commit(&metadata);
@@ -165,6 +220,42 @@ fn remote_server_contracts() {
             assert!(result.is_err(), "fixture rejects SFTP v3 overwrite");
         } else {
             result.unwrap();
+        }
+        if key != "MC_TEST_SSH" {
+            let marker = root.join("fault-truncate-upload");
+            marker.fs.mkdir(&marker.path, &ctx).unwrap();
+            let truncated = root.join("truncated.txt");
+            let mut writer = truncated.fs.create(&truncated.path, false, &ctx).unwrap();
+            writer.write_all(b"payload").unwrap();
+            let error = writer.commit(&metadata).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("unexpected byte count"),
+                "{error:#}"
+            );
+            assert!(truncated.metadata(false, &ctx).is_err());
+            marker.fs.remove(&marker.path, true, &ctx).unwrap();
+        }
+        if key == "MC_TEST_FTP" {
+            let uncertain = root.join("reply-lost.txt");
+            let mut writer = uncertain.fs.create(&uncertain.path, false, &ctx).unwrap();
+            writer.write_all(b"payload").unwrap();
+            let error = writer.commit(&metadata).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("could not be confirmed"),
+                "{error:#}"
+            );
+            let mut bytes = String::new();
+            uncertain
+                .fs
+                .open_read(&uncertain.path, &ctx)
+                .unwrap()
+                .read_to_string(&mut bytes)
+                .unwrap();
+            assert_eq!(
+                bytes, "payload",
+                "The server completed the rename even though its response was lost"
+            );
+            uncertain.fs.remove(&uncertain.path, false, &ctx).unwrap();
         }
 
         let aborted = root.join("aborted.txt");
@@ -257,9 +348,140 @@ fn remote_server_contracts() {
         assert_eq!(data, "hello world");
     }
     let unknown = std::env::var("MC_TEST_UNKNOWN_SSH").unwrap();
-    let error = remote::connect(&unknown, &ctx).unwrap_err().to_string();
+    let error = remote::connect(&unknown, &Context::default())
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("not trusted"), "{error}");
+    let known =
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".ssh/known_hosts");
+    let before = std::fs::read(&known).unwrap();
+    let (tx, rx) = mpsc::channel::<mc::vfs::AuthRequest>();
+    std::thread::spawn(move || {
+        while let Ok(r) = rx.recv() {
+            let answer = if r.confirmation {
+                assert!(r.resource.contains("SHA256:"));
+                "trust"
+            } else {
+                "test-password"
+            };
+            let _ = r.reply.send(Some(Secret::new(answer.into())));
+        }
+    });
+    let trusted = Context {
+        auth: Some(tx),
+        ..Default::default()
+    };
+    remote::connect_path(&unknown, &trusted).unwrap();
+    assert_eq!(
+        std::fs::read(&known).unwrap(),
+        before,
+        "Trust must be session-only"
+    );
+    let config = known.parent().unwrap().join("config");
+    std::fs::write(&config, "Host *\n StrictHostKeyChecking yes\n").unwrap();
+    let error = remote::connect_path(&unknown, &trusted)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("StrictHostKeyChecking"));
+    std::fs::remove_file(config).unwrap();
+    let mfa = std::env::var("MC_TEST_MFA").unwrap();
+    remote::connect(&mfa, &ctx).unwrap();
+    remote::connect(&mfa.replace("mfa@", "mfa-key@"), &ctx).unwrap();
     let changed = std::env::var("MC_TEST_CHANGED_SSH").unwrap();
     let error = remote::connect(&changed, &ctx).unwrap_err().to_string();
     assert!(error.contains("host key changed"), "{error}");
+}
+
+#[test]
+#[ignore = "run via tests/openssh_server.py with an isolated OpenSSH daemon"]
+fn openssh_contracts() {
+    let endpoint = std::env::var("MC_TEST_OPENSSH").unwrap();
+    // No password provider: this must authenticate with the disposable key.
+    let ctx = Context::default();
+    for (scheme, alias) in [
+        ("sftp", "direct"),
+        ("ssh", "direct"),
+        ("sftp", "viajump"),
+        ("ssh", "viajump"),
+        ("sftp", "encrypted"),
+    ] {
+        let ctx = if alias == "encrypted" {
+            let (tx, rx) = mpsc::channel::<mc::vfs::AuthRequest>();
+            std::thread::spawn(move || {
+                while let Ok(r) = rx.recv() {
+                    assert!(r.resource.contains("passphrase"));
+                    let _ = r.reply.send(Some(Secret::new("test-passphrase".into())));
+                }
+            });
+            Context {
+                auth: Some(tx),
+                ..Default::default()
+            }
+        } else {
+            ctx.clone()
+        };
+        let root = remote::connect(&format!("{scheme}://{alias}{endpoint}"), &ctx).unwrap();
+        let hello = root.join("hello.txt");
+        let mut text = String::new();
+        hello
+            .fs
+            .open_read(&hello.path, &ctx)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "hello world");
+        let meta = Metadata {
+            kind: Kind::File,
+            size: 7,
+            modified: std::time::SystemTime::now(),
+            permissions: None,
+        };
+        let target = root.join("target");
+        let mut writer = target.fs.create(&target.path, false, &ctx).unwrap();
+        writer.write_all(b"payload").unwrap();
+        writer.commit(&meta).unwrap();
+        let mut short = target.fs.create(&target.path, true, &ctx).unwrap();
+        short.write_all(b"short").unwrap();
+        assert!(short.commit(&meta).is_err());
+        let mut replace = target.fs.create(&target.path, true, &ctx).unwrap();
+        replace.write_all(b"updated").unwrap();
+        let result = replace.commit(&meta);
+        if scheme == "ssh" {
+            result.unwrap();
+        } else {
+            assert!(
+                result.is_err(),
+                "OpenSSH SFTP v3 rename must not delete the old destination to replace it"
+            );
+        }
+        let mut text = String::new();
+        target
+            .fs
+            .open_read(&target.path, &ctx)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(
+            text,
+            if scheme == "ssh" {
+                "updated"
+            } else {
+                "payload"
+            }
+        );
+        target.fs.remove(&target.path, false, &ctx).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while root.read_dir(&ctx).unwrap().iter().any(|(p, _)| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".mc-upload-")
+        }) {
+            assert!(
+                std::time::Instant::now() < until,
+                "staging cleanup did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }

@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 #[derive(Clone, Debug)]
@@ -47,14 +47,14 @@ pub fn directory_size(path: &VfsPath, cancel: &AtomicBool) -> DirectorySize {
 }
 fn scan_size(path: &VfsPath, cancel: &AtomicBool, ctx: &Context) -> DirectorySize {
     let mut total = DirectorySize::default();
-    let mut pending = vec![path.clone()];
-    while let Some(path) = pending.pop() {
+    let mut pending = vec![(path.clone(), path.metadata(false, ctx))];
+    while let Some((path, meta)) = pending.pop() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        match path.metadata(false, ctx) {
+        match meta {
             Ok(m) if m.kind == Kind::Directory => match path.read_dir(ctx) {
-                Ok(entries) => pending.extend(entries.into_iter().map(|(p, _)| p)),
+                Ok(entries) => pending.extend(entries.into_iter().map(|(p, m)| (p, Ok(m)))),
                 Err(_) => total.errors += 1,
             },
             Ok(m) => total.bytes = total.bytes.saturating_add(m.size),
@@ -63,8 +63,13 @@ fn scan_size(path: &VfsPath, cancel: &AtomicBool, ctx: &Context) -> DirectorySiz
     }
     total
 }
+enum ListingEvent {
+    Batch(Vec<Entry>),
+    Done(Result<()>),
+}
 struct Listing {
-    receiver: mpsc::Receiver<Result<Vec<Entry>>>,
+    receiver: mpsc::Receiver<ListingEvent>,
+    first: bool,
     cancel: Arc<AtomicBool>,
 }
 impl Drop for Listing {
@@ -73,6 +78,7 @@ impl Drop for Listing {
     }
 }
 pub struct Panel {
+    refreshed: Instant,
     context: Context,
     pub path: VfsPath,
     pub entries: Vec<Entry>,
@@ -94,6 +100,7 @@ impl Panel {
     }
     pub fn with_context(path: impl Into<VfsPath>, context: Context) -> Self {
         let mut p = Self {
+            refreshed: Instant::now(),
             context,
             path: path.into(),
             entries: vec![],
@@ -113,29 +120,45 @@ impl Panel {
         p
     }
     pub fn refresh(&mut self) {
+        if self.reveal.is_none() {
+            self.reveal = self.current().map(|e| e.path.clone());
+        }
         self.size_scan = None;
         self.directory_sizes.clear();
         let path = self.path.clone();
         let hidden = self.hidden;
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(2);
         self.loading = true;
         self.error = None;
         let ctx = Context {
             cancel: Arc::new(AtomicBool::new(false)),
             ..self.context.clone()
         };
+        self.refreshed = Instant::now();
         self.pending = Some(Listing {
+            first: true,
             receiver: rx,
             cancel: ctx.cancel.clone(),
         });
         std::thread::spawn(move || {
-            let _ = tx.send((|| {
+            let result = (|| {
                 let mut entries = vec![];
-                for (path, m) in path.read_dir(&ctx)? {
-                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                path.fs.visit_dir(&path.path, &ctx, &mut |entry| {
+                    ctx.check()?;
+                    let m = entry.metadata;
+                    let name = entry.name.to_string_lossy().into_owned();
+                    anyhow::ensure!(
+                        std::path::Path::new(&entry.name).components().count() == 1
+                            && matches!(
+                                std::path::Path::new(&entry.name).components().next(),
+                                Some(std::path::Component::Normal(_))
+                            ),
+                        "Invalid directory entry name"
+                    );
                     if !hidden && name.starts_with('.') {
-                        continue;
+                        return Ok(());
                     }
+                    let path = path.join(entry.name);
                     entries.push(Entry {
                         directory: m.kind == Kind::Directory
                             || (m.kind == Kind::Symlink
@@ -148,40 +171,72 @@ impl Panel {
                         name,
                         path,
                     });
+                    if entries.len() >= 256 {
+                        tx.send(ListingEvent::Batch(std::mem::take(&mut entries)))?;
+                    }
+                    Ok(())
+                })?;
+                if !entries.is_empty() {
+                    tx.send(ListingEvent::Batch(entries))?;
                 }
-                Ok(entries)
-            })());
+                Ok(())
+            })();
+            let _ = tx.send(ListingEvent::Done(result));
         });
+    }
+    pub fn auto_refresh(&mut self) {
+        let interval = if self.path.fs.is_remote() { 15 } else { 3 };
+        if (self.path.local_path().is_some() || self.path.fs.is_remote())
+            && !self.loading
+            && self.selected.is_empty()
+            && self.refreshed.elapsed() > Duration::from_secs(interval)
+        {
+            self.refresh();
+        }
     }
     pub fn poll(&mut self) {
         self.poll_sizes();
-        let result = self
-            .pending
-            .as_ref()
-            .and_then(|listing| listing.receiver.try_recv().ok());
-        if let Some(result) = result {
-            self.pending = None;
-            self.loading = false;
-            match result {
-                Ok(entries) => {
-                    let old = self
-                        .reveal
-                        .take()
-                        .or_else(|| self.current().map(|e| e.path.clone()));
-                    self.entries = entries;
-                    self.sort_entries();
-                    self.selected
-                        .retain(|p| self.entries.iter().any(|e| &e.path == p));
-                    self.cursor = old
-                        .and_then(|p| self.entries.iter().position(|e| e.path == p).map(|i| i + 1))
-                        .unwrap_or(self.cursor.min(self.entries.len()));
+        let old = self
+            .reveal
+            .clone()
+            .or_else(|| self.current().map(|e| e.path.clone()));
+        let mut changed = false;
+        for _ in 0..8 {
+            let event = self
+                .pending
+                .as_ref()
+                .and_then(|p| p.receiver.try_recv().ok());
+            let Some(event) = event else {
+                break;
+            };
+            if self.pending.as_ref().unwrap().first {
+                self.entries.clear();
+                self.pending.as_mut().unwrap().first = false;
+                changed = true;
+            }
+            match event {
+                ListingEvent::Batch(entries) => {
+                    self.entries.extend(entries);
+                    changed = true;
                 }
-                Err(e) => {
-                    self.entries.clear();
-                    self.cursor = 0;
-                    self.selected.clear();
-                    self.error = Some(e.to_string());
+                ListingEvent::Done(result) => {
+                    self.pending = None;
+                    self.loading = false;
+                    self.refreshed = Instant::now();
+                    self.error = result.err().map(|e| e.to_string());
+                    let paths = self.entries.iter().map(|e| &e.path).collect::<HashSet<_>>();
+                    self.selected.retain(|p| paths.contains(p));
+                    break;
                 }
+            }
+        }
+        if changed {
+            self.sort_entries();
+            if let Some(i) = old.and_then(|p| self.entries.iter().position(|e| e.path == p)) {
+                self.cursor = i + 1;
+                self.reveal = None;
+            } else {
+                self.cursor = self.cursor.min(self.entries.len());
             }
         }
     }
@@ -258,16 +313,21 @@ impl Panel {
         total
     }
     pub fn sort_entries(&mut self) {
-        self.entries.sort_by(|a, b| {
-            b.directory
-                .cmp(&a.directory)
-                .then_with(|| match self.sort {
-                    Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                    Sort::Size => b.size.cmp(&a.size),
-                    Sort::Modified => b.modified.cmp(&a.modified),
-                })
-                .then_with(|| a.path.cmp(&b.path))
-        });
+        match self.sort {
+            Sort::Name => self
+                .entries
+                .sort_by_cached_key(|e| (!e.directory, e.name.to_lowercase(), e.path.path.clone())),
+            Sort::Size => self.entries.sort_by_cached_key(|e| {
+                (!e.directory, std::cmp::Reverse(e.size), e.path.path.clone())
+            }),
+            Sort::Modified => self.entries.sort_by_cached_key(|e| {
+                (
+                    !e.directory,
+                    std::cmp::Reverse(e.modified),
+                    e.path.path.clone(),
+                )
+            }),
+        }
     }
     pub fn current(&self) -> Option<&Entry> {
         self.cursor.checked_sub(1).and_then(|i| self.entries.get(i))
@@ -301,6 +361,7 @@ impl Panel {
     }
     pub fn navigate(&mut self, path: VfsPath) {
         self.path = path;
+        self.reveal = None;
         self.cursor = 0;
         self.offset = 0;
         self.entries.clear();

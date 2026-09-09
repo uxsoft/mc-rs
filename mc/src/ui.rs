@@ -21,6 +21,29 @@ pub fn size(n: u64) -> String {
         format!("{:.1}G", n as f64 / 1073741824.0)
     }
 }
+fn clip_line(value: &str, width: usize) -> String {
+    let clean = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    if Span::raw(&clean).width() <= width {
+        return clean;
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in clean.chars() {
+        let n = Span::raw(c.to_string()).width();
+        if used + n > width.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        used += n;
+    }
+    if width > 0 {
+        out.push('…');
+    }
+    out
+}
 fn popup(frame: &mut Frame, app: &mut App, title: &str, text: Text<'_>, height: u16) {
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(86);
@@ -332,29 +355,94 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ),
             Dialog::Jobs => {
                 let mut lines = vec![];
-                for job in app.jobs.iter().rev().take(8) {
+                let row_width = frame
+                    .area()
+                    .width
+                    .saturating_sub(4)
+                    .min(86)
+                    .saturating_sub(2) as usize;
+                for (i, job) in app
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .skip(app.job_cursor / 4 * 4)
+                    .take(4)
+                {
                     let p = job.progress.lock().unwrap();
-                    lines.push(Line::from(format!(
-                        "{} · {} · {} files · {}",
-                        job.title,
-                        if p.done { "finished" } else { "running" },
-                        p.files,
-                        size(p.bytes)
-                    )));
                     lines.push(Line::styled(
-                        p.error.clone().unwrap_or_else(|| p.current.clone()),
-                        Style::default().fg(if p.error.is_some() {
-                            Color::LightRed
-                        } else {
-                            DIM
-                        }),
+                        clip_line(
+                            &format!(
+                                "{} {} · {} · {} files · {}",
+                                if i == app.job_cursor { ">" } else { " " },
+                                job.title,
+                                if p.done {
+                                    if p.error.is_some() {
+                                        "failed"
+                                    } else {
+                                        "finished"
+                                    }
+                                } else if p.conflict.is_some() {
+                                    "waiting"
+                                } else {
+                                    "running"
+                                },
+                                p.files,
+                                size(p.bytes)
+                            ),
+                            row_width,
+                        ),
+                        Style::default().fg(if i == app.job_cursor { ACCENT } else { FG }),
                     ));
+                    lines.push(Line::from(clip_line(&p.current, row_width)));
                 }
-                if lines.is_empty() {
+                while lines.len() < 8 {
+                    lines.push(Line::from(""));
+                }
+                if let Some(job) = app.jobs.get(app.job_cursor) {
+                    let p = job.progress.lock().unwrap();
+                    if !p.done {
+                        let rate = p.bytes as f64 / job.started.elapsed().as_secs_f64().max(0.1);
+                        if let Some(total) = p.current_total {
+                            let ratio = if total == 0 {
+                                1.0
+                            } else {
+                                (p.current_bytes as f64 / total as f64).min(1.0)
+                            };
+                            let bars = (ratio * 20.0) as usize;
+                            let eta = if rate > 0.0 {
+                                format!(
+                                    "{:.0}s",
+                                    total.saturating_sub(p.current_bytes) as f64 / rate
+                                )
+                            } else {
+                                "—".into()
+                            };
+                            lines.push(Line::from(format!(
+                                "File [{}{}] {:.0}% · {}/s · ETA {}",
+                                "━".repeat(bars),
+                                "─".repeat(20 - bars),
+                                ratio * 100.0,
+                                size(rate as u64),
+                                eta
+                            )));
+                        }
+                    }
+                    if let Some(error) = &p.error {
+                        lines.push(Line::styled(
+                            error.clone(),
+                            Style::default().fg(Color::LightRed),
+                        ));
+                    }
+                } else {
                     lines.push(Line::from("No jobs yet."));
                 }
-                lines.push(Line::from("c: cancel running job   Enter / Esc: close"));
-                ("Background jobs".into(), Text::from(lines), 21)
+                lines.push(Line::from(
+                    "↑/↓: select · c: cancel selected · r: retry failed",
+                ));
+                lines.push(Line::from(
+                    "Retry restarts remaining sources; conflicts ask again.",
+                ));
+                ("Background jobs".into(), Text::from(lines), 23)
             }
             Dialog::Quit => (
                 "Jobs still running".into(),
@@ -367,7 +455,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         popup(frame, app, &title, text, height);
         let footer = match &app.dialog {
             Some(Dialog::Input { .. } | Dialog::Delete { .. }) => " [ Confirm ]     [ Cancel ]",
-            Some(Dialog::Jobs) => " [ Cancel jobs ]  [ Close ]",
+            Some(Dialog::Jobs) => " [ Cancel ] [ Retry ] [ Close ]",
             Some(Dialog::Quit) => " [ Cancel jobs ]  [ Keep working ]",
             _ => " [ Close ]",
         };
@@ -423,7 +511,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let text = format!(
             "{}\n{}\n{}\nEnter: unlock   Esc: cancel",
             password.request.resource,
-            if password.request.retry {
+            if password.request.confirmation {
+                "Type trust to accept for this connection:"
+            } else if password.request.retry {
                 if remote {
                     "Authentication rejected. Try again:"
                 } else {
@@ -432,7 +522,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 "Password:"
             },
-            "•".repeat(password.value.chars().count())
+            if password.request.confirmation {
+                password.value.to_string()
+            } else {
+                "•".repeat(password.value.chars().count())
+            }
         );
         popup(
             frame,
@@ -443,7 +537,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 "Unlock archive"
             },
             text.into(),
-            8,
+            if password.request.confirmation {
+                12
+            } else {
+                10
+            },
         );
     }
 }
