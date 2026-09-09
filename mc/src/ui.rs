@@ -195,6 +195,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 FG
             });
+            let style = if selected { style.bold() } else { style };
             let style = if index == p.cursor {
                 style
                     .bg(if i == app.active {
@@ -206,14 +207,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 style
             };
-            table_rows.push(
-                Row::new([
-                    format!("{}{}", if selected { "●" } else { " " }, name),
-                    bytes,
-                    date,
-                ])
-                .style(style),
-            );
+            table_rows.push(Row::new([name, bytes, date]).style(style));
         }
         let widths = if inner.width >= 48 {
             vec![
@@ -415,18 +409,42 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             6,
         );
     }
+    if app.connecting.is_some() {
+        popup(
+            frame,
+            app,
+            "Connecting / opening directory",
+            "Working…\nEsc: cancel".into(),
+            6,
+        );
+    }
     if let Some(password) = &app.password {
+        let remote = crate::vfs::remote::is_url(&password.request.resource);
         let text = format!(
             "{}\n{}\n{}\nEnter: unlock   Esc: cancel",
             password.request.resource,
             if password.request.retry {
-                "Password rejected or encrypted data damaged. Try again:"
+                if remote {
+                    "Authentication rejected. Try again:"
+                } else {
+                    "Password rejected or encrypted data damaged. Try again:"
+                }
             } else {
                 "Password:"
             },
             "•".repeat(password.value.chars().count())
         );
-        popup(frame, app, "Unlock archive", text.into(), 8);
+        popup(
+            frame,
+            app,
+            if remote {
+                "Remote authentication"
+            } else {
+                "Unlock archive"
+            },
+            text.into(),
+            8,
+        );
     }
 }
 

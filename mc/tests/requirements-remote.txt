@@ -1,0 +1,2 @@
+paramiko>=2.12,<5
+pyftpdlib==2.2.0

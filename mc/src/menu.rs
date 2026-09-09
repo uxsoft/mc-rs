@@ -8,6 +8,8 @@ pub enum Action {
     Hidden,
     Refresh,
     Goto,
+    Connect(&'static str),
+    Local,
     Find,
     Jobs,
 }
@@ -114,6 +116,26 @@ pub const MENUS: &[Menu] = &[
                 label: "Find filename…",
                 shortcut: "Alt+?",
                 action: Action::Find,
+            },
+            Item {
+                label: "FTP connection…",
+                shortcut: "",
+                action: Action::Connect("ftp://"),
+            },
+            Item {
+                label: "SFTP connection…",
+                shortcut: "",
+                action: Action::Connect("sftp://"),
+            },
+            Item {
+                label: "SSH connection…",
+                shortcut: "",
+                action: Action::Connect("ssh://"),
+            },
+            Item {
+                label: "Local directory",
+                shortcut: "",
+                action: Action::Local,
             },
         ],
     },

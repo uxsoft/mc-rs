@@ -27,6 +27,12 @@ shell-words = "1"
 chrono = "0.4"
 ctrlc = "3"
 zeroize = "1"
+ssh2 = "0.9.6"
+suppaftp = { version = "8", default-features = false }
+url = "2"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
 rars = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }

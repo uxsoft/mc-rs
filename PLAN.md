@@ -24,7 +24,7 @@ Current phase: VFS and lazy/password-protected archive migration complete and ve
 - No MC shell functionality: no command prompt, persistent subshell, Ctrl+O shell switching, or command execution interface. Directly launching the viewer/editor is still in scope.
 - Required archive formats: ZIP, RAR, tar, 7z, and gzip.
 - Filename search only; no content search.
-- SFTP, FTP, and SSH-based remote browsing are deferred. The user explicitly requires an MC-inspired VFS foundation now, shared by local and archive operations and suitable for those later backends.
+- FTP, SFTP, and SSH remote browsing are implemented through the shared MC-inspired VFS. SSH uses a Python 3 helper and does not require SFTP. See the remote implementation progress entry below and VFS.md for guarantees and limitations.
 - Archive browsing retains metadata in memory and streams requested content; implement password prompts, retries, cancellation, and session-only credentials.
 - No customization system or importing MC configurations, keymaps, skins, extension rules, or user menus.
 - GPL-3 license is acceptable. Planned project license identifier: GPL-3.0-or-later, matching upstream; retain attribution for adapted material.
@@ -267,7 +267,7 @@ crates.io publishing follow-up:
 - Copies preserve ordinary permissions but not timestamps, ownership, ACLs, extended attributes, sparse layout, or hard-link relationships. Windows symlink creation depends on OS privileges; replacing a symlink may fail safely.
 - Cancellation is cooperative and does not roll back completed items. OS trash calls cannot be cancelled mid-call. Jobs are not persisted across application exit.
 - Listing workers deliver full snapshots; no filesystem watcher. Superseded receivers are discarded, preventing stale results from replacing current navigation.
-- The UI uses fixed supported MC shortcuts. Omitted upstream features (shell, internal viewer/editor, customization, remote access) have no substitute shortcut actions. This does not claim full upstream MC parity.
+- The UI uses fixed supported MC shortcuts. Omitted upstream features (shell, internal viewer/editor, customization) have no substitute shortcut actions. This does not claim full upstream MC parity.
 
 ### Validation actually completed
 
@@ -285,7 +285,7 @@ crates.io publishing follow-up:
 2. Run the configured native CI matrix when repository hosting/runners are available. Resolve any macOS/Windows build, libarchive linking, trash, or terminal differences. Do not mark those platforms verified until actual results exist.
 3. Complete M6 native runtime checks and artifact generation for Linux ARM64, macOS ARM64, and Windows x64. Private repositories may need a different ARM runner entitlement/label.
 4. Exercise larger real-world directories and archives interactively; expand tests only for failures or unresolved concerns. Audit the supported shortcut subset against the manual as functionality expands.
-5. Follow the VFS contract in `VFS.md` when adding remote providers; consider seekable archive member handles, RAR reader transport, incremental indexing, metadata preservation, and improved per-job controls; preserve the requested feature scope.
+5. Exercise the new remote providers against real servers and native clients. Follow `VFS.md` for protocol guarantees; future work includes reconnect/resume, remote RAR transport, seekable archive member handles, incremental indexing, metadata preservation, and improved per-job controls.
 
 Run locally from the repository root:
 
@@ -293,7 +293,7 @@ Run locally from the repository root:
 cargo run --manifest-path mc/Cargo.toml --release -- /left/directory /right/directory
 ```
 
-Deferred backlog: SFTP, FTP, and SSH-based remote access; archive creation/modification only if requested later.
+Deferred backlog: FTPS, SSH config/ProxyJump/MFA, reconnect/resume, remote RAR transport, and stronger FTP publication guarantees; archive creation/modification only if requested later.
 
 2026-09-08 — GitHub publication:
 - User authorized publishing the project to https://github.com/uxsoft/mc-rs.git. The destination has no existing branch refs.
@@ -335,3 +335,17 @@ Deferred backlog: SFTP, FTP, and SSH-based remote access; archive creation/modif
 2026-09-08 — move this crate to the 0.2 release series:
 - Updated mc/Cargo.toml and its matching Cargo.lock package entry to 0.2.0. CI continues deriving the patch from GITHUB_RUN_NUMBER, now publishing 0.2.<run number>; executable remains mc. Updated the README example.
 - Validation passed: all five version-script tests, stamping a disposable copy of the actual manifests to 0.2.42, locked offline Cargo metadata, and diff checks. No crate was published during this change.
+
+2026-09-08 — simplify selection styling:
+- Removed the selection dot and its reserved prefix space from panel rows. Selected entries use the existing gold color plus bold text, including when the cursor moves away. File type icons and cursor background highlighting remain.
+- Validation: formatting, existing small/normal terminal rendering test, and diff checks passed.
+
+2026-09-08 — FTP, SFTP, and SSH VFS:
+- Implemented FTP with suppaftp and SFTP with ssh2/libssh2. Per the user's clarification, ssh:// uses a fixed embedded Python 3 helper over an SSH exec channel, supporting Unix servers without SFTP. User paths/data travel over framed stdin/stdout, never shell interpolation; the helper is not installed remotely.
+- Added URL parsing, IPv6/custom ports, percent-encoded labels, password-free identities, masked authentication/retry, strict known_hosts verification, SSH agent/default key/password authentication, and session-owned streaming/seek handles. Plain FTP is explicitly identified as unencrypted. Unsupported credential-bearing URLs, control characters, and non-UTF-8 names fail clearly.
+- Added Go menu connection actions, Alt+C URL navigation, local-directory return, and remote startup arguments for either panel. Connection and directory checks use cancellable workers. Remote lock preflight does no network I/O and conservatively locks the endpoint, including archive backing resources. Remote destination lookup distinguishes missing entries from transport/permission errors.
+- Normal browse/search/selection sizing, cat, recursive background copy/move, mkdir, and permanent deletion dispatch through FileSystem. Remote trash fails with instructions to explicitly choose permanent deletion. SSH and SFTP reads are seekable; FTP uses REST and fresh transfers after seeks. Remote ZIP was exercised without local extraction; RAR remains local-only.
+- Added destination staging and cleanup on failed/cancelled writes. SSH commits with atomic no-replace or explicit replacement. SFTP overwrite can fail safely when a server lacks replacement support. FTP has no conditional rename: conflict checks immediately precede RNTO but cannot prevent concurrent-client races. Old targets are never deleted to force a rename. Disconnects may leave staging files; mutations are not automatically retried. These limits are documented in README/VFS.md.
+- Added loopback FTP and SSH integration fixtures, with separate SFTP and SSH-without-SFTP endpoints and isolated HOME/known_hosts. Tests cover seeking, retained handles, staged abort/commit, conflict preservation, recursive upload/move/delete, remote ZIP, and unknown/changed host-key rejection. Remote PTY flows cover startup, masked incorrect-password retry, selection/sizing, cat, copy, and clean exit; FTP PTY disables MLSD to exercise LIST fallback.
+- Validation passed on Linux x64: 33 standard Rust tests plus the separate remote-server contract test, all three remote PTY flows, both existing local/archive PTY suites, strict Clippy, formatting, release build, package-content checks (including helper.py), Python syntax, workflow YAML, and diff checks. Native remote runtime verification for Linux ARM64/macOS/Windows remains pending.
+- Linux x64 CI now runs the remote fixtures after installing test-only Python dependencies. Added explicit Linux OpenSSL development and macOS openssl@3 build setup/cache identity. Updated README build/connection instructions and VFS architecture. No commit or publication was performed for this change.

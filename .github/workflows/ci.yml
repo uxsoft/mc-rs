@@ -45,12 +45,13 @@ jobs:
           components: rustfmt, clippy
       - name: Linux archive dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libarchive-dev libssl-dev pkg-config
       - name: macOS archive dependencies
         if: runner.os == 'macOS'
         run: |
-          brew install libarchive pkg-config
+          brew install libarchive openssl@3 pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
       - name: Configure Windows dependency cache
         if: runner.os == 'Windows'
         id: vcpkg
@@ -88,7 +89,7 @@ jobs:
         with:
           workspaces: mc -> target
           shared-key: native-${{ matrix.os }}-${{ matrix.target }}
-          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST VCPKG PKG_CONFIG ImageVersion"
+          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST VCPKG PKG_CONFIG OPENSSL ImageVersion"
           cache-bin: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       - name: Set CI version
@@ -106,6 +107,14 @@ jobs:
         run: |
           python3 tests/terminal_smoke.py
           python3 tests/archive_smoke.py
+      - name: Remote VFS protocol and terminal tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+          MC_TEST_BINARY: ${{ github.workspace }}/mc/target/${{ matrix.target }}/release/mc
+        run: |
+          python -m pip install -r tests/requirements-remote.txt
+          python tests/remote_servers.py
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: mc-${{ steps.version.outputs.version }}-${{ matrix.target }}
@@ -140,13 +149,13 @@ jobs:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - name: Install archive dependencies
-        run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libarchive-dev libssl-dev pkg-config
       - name: Reuse Linux Rust dependencies
         uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: mc -> target
           shared-key: native-ubuntu-24.04-x86_64-unknown-linux-gnu
-          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST VCPKG PKG_CONFIG ImageVersion"
+          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST VCPKG PKG_CONFIG OPENSSL ImageVersion"
           cache-bin: false
           save-if: false
       - name: Set CI version

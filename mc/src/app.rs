@@ -4,7 +4,7 @@ use crate::{
     menu::{self, MENUS},
     panel::Panel,
     ui,
-    vfs::{AuthRequest, Context, Kind, Secret, VfsPath},
+    vfs::{AuthRequest, Context, Kind, Secret, VfsPath, remote},
 };
 use anyhow::Result;
 use crossterm::event::{
@@ -69,7 +69,15 @@ pub struct ViewTask {
     pub receiver: mpsc::Receiver<Result<Box<dyn std::io::Read + Send>>>,
     pub cancel: Arc<AtomicBool>,
 }
+pub struct PathTask {
+    pub receiver: mpsc::Receiver<Result<VfsPath>>,
+    pub cancel: Arc<AtomicBool>,
+    pub panel: usize,
+    pub purpose: Purpose,
+}
 pub struct App {
+    pub connecting: Option<PathTask>,
+    pending_connections: std::collections::VecDeque<(String, usize)>,
     pub password: Option<PasswordDialog>,
     auth_tx: mpsc::Sender<AuthRequest>,
     auth_rx: mpsc::Receiver<AuthRequest>,
@@ -102,6 +110,8 @@ impl App {
             ..Default::default()
         };
         Self {
+            connecting: None,
+            pending_connections: Default::default(),
             password: None,
             auth_tx,
             auth_rx,
@@ -168,6 +178,28 @@ impl App {
         Ok(())
     }
     pub fn poll(&mut self) {
+        if self.connecting.is_none()
+            && let Some((value, panel)) = self.pending_connections.pop_front()
+        {
+            self.connect_url(value, panel);
+        }
+        if let Some(result) = self
+            .connecting
+            .as_ref()
+            .and_then(|t| t.receiver.try_recv().ok())
+        {
+            let task = self.connecting.take().unwrap();
+            if !task.cancel.load(Ordering::Relaxed) {
+                match result {
+                    Ok(path) => match task.purpose {
+                        Purpose::Copy => self.start(Operation::Copy, path),
+                        Purpose::Move => self.start(Operation::Move, path),
+                        _ => self.panels[task.panel].navigate(path),
+                    },
+                    Err(e) => self.message("Connection / directory", e.to_string()),
+                }
+            }
+        }
         if self
             .password
             .as_ref()
@@ -243,6 +275,10 @@ impl App {
                 "Read-only destination",
                 "Leave the archive in the destination panel first.",
             );
+            return;
+        }
+        if op == Operation::Trash && !self.panel().path.fs.capabilities().trash {
+            self.message("Trash unavailable", "This filesystem has no trash. Use F8 and explicitly choose Permanently delete to remove remote files.");
             return;
         }
         let sources = self.panel().sources();
@@ -419,6 +455,12 @@ impl App {
         if let Some(view) = &self.viewing {
             if k.code == K::Esc {
                 view.cancel.store(true, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+        if let Some(task) = &self.connecting {
+            if k.code == K::Esc {
+                task.cancel.store(true, Ordering::Relaxed);
             }
             return Ok(());
         }
@@ -630,6 +672,19 @@ impl App {
                         "Go to directory",
                         self.panel().path.display().to_string(),
                     ),
+                    menu::Action::Connect(scheme) => self.input(
+                        Purpose::Goto,
+                        if scheme == "ftp://" {
+                            "FTP URL (unencrypted): user@host:port/path"
+                        } else {
+                            "Remote URL: user@host:port/path"
+                        },
+                        scheme.into(),
+                    ),
+                    menu::Action::Local => match std::env::current_dir() {
+                        Ok(path) => self.panel_mut().navigate(path.into()),
+                        Err(e) => self.message("Local directory", e.to_string()),
+                    },
                     menu::Action::Find => {
                         self.input(Purpose::Search, "Find filename (substring)", String::new())
                     }
@@ -706,6 +761,26 @@ impl App {
         Ok(())
     }
     fn submit(&mut self, purpose: Purpose, value: String) {
+        if matches!(purpose, Purpose::Goto | Purpose::Copy | Purpose::Move)
+            && remote::is_url(&value)
+        {
+            // Reuse an existing authenticated mount when the edited label is inside it.
+            let existing = self.panels.iter().find_map(|p| {
+                if !p.path.fs.is_remote() {
+                    return None;
+                }
+                let root = p.path.fs.label(std::path::Path::new("/"));
+                if value.starts_with(&root) {
+                    remote::Endpoint::parse(&value)
+                        .ok()
+                        .map(|e| VfsPath::new(p.path.fs.clone(), e.path))
+                } else {
+                    None
+                }
+            });
+            self.resolve_path(value, existing, purpose);
+            return;
+        }
         let path = if matches!(purpose, Purpose::Copy | Purpose::Move)
             && value == self.panels[1 - self.active].path.display()
         {
@@ -714,7 +789,18 @@ impl App {
             self.panel().path.clone()
         } else {
             let p = PathBuf::from(&value);
-            if p.is_absolute() {
+            if value.starts_with("file://") {
+                match url::Url::parse(&value)
+                    .ok()
+                    .and_then(|u| u.to_file_path().ok())
+                {
+                    Some(path) => path.into(),
+                    None => {
+                        self.message("Directory", "Invalid local file:// URL");
+                        return;
+                    }
+                }
+            } else if p.is_absolute() && !self.panel().path.fs.is_remote() {
                 p.into()
             } else {
                 self.panel().path.join(p)
@@ -729,14 +815,7 @@ impl App {
                 }
             }
             Purpose::Goto => {
-                if path.is_dir() {
-                    self.panel_mut().navigate(path);
-                } else {
-                    self.message(
-                        "Directory",
-                        "Directory does not exist or cannot be accessed",
-                    );
-                }
+                self.resolve_path(value, Some(path), purpose);
             }
             Purpose::Search => {
                 if !value.is_empty() {
@@ -756,6 +835,46 @@ impl App {
                 }
             }
         }
+    }
+    pub fn connect_url(&mut self, value: String, panel: usize) {
+        if self.connecting.is_some() {
+            self.pending_connections.push_back((value, panel));
+            return;
+        }
+        self.resolve_path(value, None, Purpose::Goto);
+        self.connecting.as_mut().unwrap().panel = panel;
+    }
+    fn resolve_path(&mut self, value: String, existing: Option<VfsPath>, purpose: Purpose) {
+        let (tx, receiver) = mpsc::channel();
+        let ctx = Context {
+            auth: Some(self.auth_tx.clone()),
+            ..Default::default()
+        };
+        let cancel = ctx.cancel.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let path = if let Some(path) = existing {
+                    path
+                } else {
+                    remote::connect_path(&value, &ctx)?
+                };
+                if matches!(purpose, Purpose::Goto) {
+                    anyhow::ensure!(
+                        path.metadata(true, &ctx)?.kind == Kind::Directory,
+                        "Not an accessible directory"
+                    );
+                }
+                ctx.check()?;
+                Ok(path)
+            })();
+            let _ = tx.send(result);
+        });
+        self.connecting = Some(PathTask {
+            receiver,
+            cancel,
+            panel: self.active,
+            purpose,
+        });
     }
     fn begin_search(&mut self, query: String) {
         let results = Arc::new(Mutex::new(vec![]));
@@ -851,7 +970,7 @@ impl App {
         m: event::MouseEvent,
         terminal: &mut ratatui::DefaultTerminal,
     ) -> Result<()> {
-        if self.password.is_some() || self.viewing.is_some() {
+        if self.password.is_some() || self.viewing.is_some() || self.connecting.is_some() {
             return Ok(());
         }
         let click = m.kind == MouseEventKind::Down(MouseButton::Left);
@@ -1032,6 +1151,9 @@ impl App {
 }
 impl Drop for App {
     fn drop(&mut self) {
+        if let Some(task) = &self.connecting {
+            task.cancel.store(true, Ordering::Relaxed);
+        }
         if let Some(v) = &self.viewing {
             v.cancel.store(true, Ordering::Relaxed);
         }

@@ -1,6 +1,7 @@
 //! Backend-dispatched filesystem operations, inspired by MC's vfs_class/vfs_path_t.
 //! Provider-relative paths never masquerade as OS paths. Open handles own their sessions.
 pub mod local;
+pub mod remote;
 use anyhow::{Result, bail};
 use std::{
     cmp::Ordering as Cmp,
@@ -159,6 +160,13 @@ pub trait FileSystem: Send + Sync {
     }
     fn canonical(&self, path: &Path) -> Result<PathBuf> {
         Ok(path.to_owned())
+    }
+    /// UI-safe lock identity. Remote providers lock their endpoint conservatively.
+    fn lock_path(&self, path: &Path) -> PathBuf {
+        self.canonical(path).unwrap_or_else(|_| path.to_owned())
+    }
+    fn is_remote(&self) -> bool {
+        false
     }
     fn same_file(&self, from: &Path, to: &Path) -> bool {
         from == to

@@ -48,6 +48,19 @@ struct Worker {
     ctx: VfsContext,
     policy: Option<Decision>,
 }
+fn lookup(path: &VfsPath, ctx: &VfsContext) -> Result<Option<crate::vfs::Metadata>> {
+    match path.metadata(false, ctx) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(e)
+            if !path.fs.is_remote()
+                || e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
 impl Worker {
     fn check(&self) -> Result<()> {
         if self.ctx.cancel.load(Ordering::Relaxed) {
@@ -57,7 +70,7 @@ impl Worker {
     }
     fn overwrite(&mut self, path: &VfsPath) -> Result<bool> {
         self.check()?;
-        if path.metadata(false, &self.ctx).is_err() {
+        if lookup(path, &self.ctx)?.is_none() {
             return Ok(false);
         }
         let decision = if let Some(d) = self.policy {
@@ -97,7 +110,7 @@ impl Worker {
         self.progress.lock().unwrap().current = from.display().to_string();
         let meta = from.metadata(false, &self.ctx)?;
         if meta.kind == Kind::Directory {
-            if let Ok(dest) = to.metadata(false, &self.ctx) {
+            if let Some(dest) = lookup(to, &self.ctx)? {
                 if dest.kind != Kind::Directory {
                     bail!("Destination is not a plain directory: {to}");
                 }
@@ -215,7 +228,9 @@ pub fn start(
                         remove(source, &worker)?;
                     }
                     Operation::Copy | Operation::Move => {
-                        let target = if destination.is_dir() {
+                        let target = if lookup(&destination, &worker.ctx)?
+                            .is_some_and(|m| m.kind == Kind::Directory)
+                        {
                             destination.join(source.file_name().context("Cannot operate on root")?)
                         } else {
                             if sources.len() > 1 {
@@ -225,7 +240,7 @@ pub fn start(
                         };
                         validate_destination(source, &target)?;
                         if op == Operation::Move
-                            && target.metadata(false, &worker.ctx).is_err()
+                            && lookup(&target, &worker.ctx)?.is_none()
                             && source.fs.id() == target.fs.id()
                             && source
                                 .fs
@@ -267,7 +282,10 @@ fn remove(path: &VfsPath, worker: &Worker) -> Result<()> {
 /// Session-aware path locks also retain and lock archive backing resources.
 pub fn resources(op: Operation, sources: &[VfsPath], destination: &VfsPath) -> Vec<VfsPath> {
     let mut paths = sources.to_vec();
-    if matches!(op, Operation::Copy | Operation::Move) && destination.is_dir() {
+    if matches!(op, Operation::Copy | Operation::Move)
+        && !destination.fs.is_remote()
+        && destination.is_dir()
+    {
         paths.extend(
             sources
                 .iter()
@@ -284,7 +302,7 @@ pub fn resources(op: Operation, sources: &[VfsPath], destination: &VfsPath) -> V
     paths.extend(backing);
     paths
         .into_iter()
-        .map(|p| VfsPath::new(p.fs.clone(), p.fs.canonical(&p.path).unwrap_or(p.path)))
+        .map(|p| VfsPath::new(p.fs.clone(), p.fs.lock_path(&p.path)))
         .collect()
 }
 /// Compare lock sets returned by `resources`; inputs must already be canonicalized.

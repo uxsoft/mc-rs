@@ -6,9 +6,9 @@ A modern dual-panel terminal file manager written in Rust and Ratatui. The crate
 
 Install a current stable Rust toolchain and libarchive development libraries:
 
-- Debian/Ubuntu: `sudo apt install libarchive-dev pkg-config`
-- Fedora: `sudo dnf install libarchive-devel pkgconf-pkg-config`
-- macOS ARM64: `brew install libarchive pkg-config`. If needed, set `PKG_CONFIG_PATH` to the `lib/pkgconfig` directory under `brew --prefix libarchive`.
+- Debian/Ubuntu: `sudo apt install libarchive-dev libssl-dev pkg-config`
+- Fedora: `sudo dnf install libarchive-devel openssl-devel pkgconf-pkg-config`
+- macOS ARM64: `brew install libarchive openssl@3 pkg-config`. If needed, set `PKG_CONFIG_PATH` to the `lib/pkgconfig` directory under `brew --prefix libarchive` and `OPENSSL_DIR` to `brew --prefix openssl@3`.
 - Windows x64/MSVC: install libarchive with `vcpkg install libarchive:x64-windows-static-md`, set `VCPKG_ROOT` to your vcpkg directory, and `VCPKGRS_TRIPLET=x64-windows-static-md`.
 
 From this repository:
@@ -78,11 +78,30 @@ Decoded output uses a bounded channel (two 64 KiB chunks), plus decoder dictiona
 
 Archive paths reject absolute paths, traversal, Windows path syntax, and duplicate/conflicting names. Unsupported link/special entries fail rather than being restored as filesystem links. If the backing archive's size or modification time changes, leave and reopen it.
 
-Local files and archives share a provider interface, typed locations, and owned handles inspired by Midnight Commander's VFS. See [VFS.md](VFS.md) for the architecture and future remote-backend contract.
+Local files, archives, and remote servers share a provider interface, typed locations, and owned handles inspired by Midnight Commander's VFS. See [VFS.md](VFS.md) for the architecture and provider guarantees.
+
+## Remote connections
+
+Use **Go → FTP / SFTP / SSH connection**, enter a URL through **Alt+C**, or pass URLs as startup locations:
+
+```sh
+mc 'sftp://alice@example.com/home/alice' /local/downloads
+mc 'ssh://alice@example.com:2222/home/alice' 'ftp://user@files.example.com/public'
+```
+
+- `sftp://` uses the server's SFTP subsystem. `ssh://` works without SFTP by running an embedded Python 3 helper on a Unix server through its SSH login shell. The helper receives paths and content through stdin; filenames never become shell commands. It is not installed on the server.
+- SSH authentication tries the SSH agent, `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`, then a masked password/private-key passphrase prompt. Host keys must already match `~/.ssh/known_hosts`. For a new host, connect once with your SSH client (for example `ssh -p 2222 alice@example.com`), verify its fingerprint, and accept it there before using mc. Unknown or changed keys are never accepted automatically. `~/.ssh/config`, jump hosts, keyboard-interactive/MFA, and custom key selection are not implemented; load custom keys into your agent.
+- `ftp://` is plain, unencrypted FTP using passive transfers. It defaults to anonymous login when the user is omitted. Named users get a masked password prompt. FTPS is not implemented. Passwords are rejected in URLs and are never saved in configuration.
+- Paths are absolute on the server. Spaces and URL delimiters can be percent-encoded. UTF-8 names are supported; control characters and backslashes are rejected. Within a remote panel, relative and absolute paths stay on that server. **Go → Local directory** returns to the process's local working directory; `file:///absolute/path` also opens a local location.
+- Browse, select/size directories, search filenames, F3 stream to `cat`, and copy/move/mkdir/permanently delete using the normal keys and background jobs. Remote files have no trash: F8 retains the trash default and explains that permanent deletion must be chosen explicitly. Remote editing and creating remote symlinks are not implemented.
+- Uploads are staged on the destination server. SSH publishes with atomic no-replace or explicit replacement; SFTP uses server rename semantics and fails without deleting the old destination if replacement is unsupported. FTP checks for conflicts immediately before rename, but the protocol cannot prevent a race with another client's concurrent changes. Failed connections may leave staging files for manual cleanup. Mutations are never automatically retried.
+- FTP seeking uses REST and new transfer connections, so servers must support REST for random access. ZIP, tar, 7z, and gzip can use remote sources without a local extracted tree; RAR still requires copying the archive locally. Archive indexing may read significant remote data.
+
+Esc cancels connection/authentication work. Network calls have ten-second socket/SSH timeouts; cancellation can wait for an in-flight call or DNS lookup. Remote locks conservatively cover an entire user/host/port endpoint, including archive backing files. Reconnect via the connection menu after leaving an expired mount; active failed jobs are not resumed.
 
 ## Current limits
 
-- No shell prompt, subshell, command execution, built-in editor/viewer, remote protocols, plugins, or customization. F2 user menus are omitted. This is not full MC feature parity.
+- No shell prompt, subshell, user command execution, built-in editor/viewer, plugins, or customization. F2 user menus are omitted. This is not full MC feature parity.
 - Copies preserve ordinary permissions, but not ownership, ACLs, extended attributes, sparse layout, or hard-link relationships. Copy timestamps are not yet preserved. Windows symlink creation needs the appropriate OS privilege; symlink overwrite can fail safely on Windows.
 - Cancellation preserves already completed work and removes incomplete temporary files; it is not rollback. An interrupted multi-file move may leave completed items at the destination and remaining items at the source. Trash calls cannot be interrupted midway through an OS operation.
 - Directory listings and searches run off the UI thread. Initial directory listings are delivered as a complete snapshot, not incrementally. No filesystem watcher; use Ctrl+R for external changes.
@@ -97,6 +116,9 @@ cargo test --manifest-path mc/Cargo.toml
 cargo build --manifest-path mc/Cargo.toml
 python3 mc/tests/terminal_smoke.py  # Linux/Unix pseudo-terminal integration test
 python3 mc/tests/archive_smoke.py   # encrypted archives, streamed cat, copy, retry/cancel
+# In a Python environment with pip:
+python3 -m pip install -r mc/tests/requirements-remote.txt
+python3 mc/tests/remote_servers.py  # isolated loopback FTP/SFTP/SSH + terminal tests
 ```
 
 Tests use disposable files. The terminal smoke test redirects the Linux trash location to its own temporary directory. It exercises cat, copying, moving, mkdir, both deletion modes, search-result selection, mouse input, resize, and terminal restoration.
