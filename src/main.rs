@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "mc — dual-panel file manager\nUsage: mc [LEFT_DIRECTORY] [RIGHT_DIRECTORY]\nF1 help · F3 cat · F4 editor · F5 copy · F6 move · F7 mkdir · F8 delete · F9 menu · F10 quit\nRemote URLs: ftp://, sftp://, ssh:// (SSH helper requires Python 3).\nArchives: ZIP, RAR, tar, 7z, gzip (read-only). Requires libarchive; cat must be on PATH."
+            "mc — dual-panel file manager\nUsage: mc [LEFT_DIRECTORY] [RIGHT_DIRECTORY]\nF1 help · F3 viewer · F4 editor · F5 copy · F6 move · F7 mkdir · F8 delete · F9 menu · F10 quit\nRemote URLs: ftp://, sftp://, ssh:// (SSH helper requires Python 3).\nArchives: ZIP, RAR, tar, 7z, gzip (read-only). Requires libarchive; cat must be on PATH for Enter/double-click."
         );
         return Ok(());
     }
@@ -56,7 +56,10 @@ fn main() -> Result<()> {
     }));
     let result = (|| {
         execute!(io::stdout(), EnableMouseCapture)?;
-        app.run(&mut terminal)
+        (app.image_picker, app.startup_keys) = mc::viewer::detect_terminal();
+        let result = app.run(&mut terminal);
+        mc::viewer::clear_graphics(&app.image_picker)?;
+        result
     })();
     mc::external::suspend();
     result

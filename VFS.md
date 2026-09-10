@@ -17,7 +17,7 @@ This is an independent Rust implementation of those architectural ideas, not a l
 
 ## Contract
 
-`mc/src/vfs/mod.rs` defines:
+`src/vfs/mod.rs` defines:
 
 - `FileSystem`: metadata, directory listings, read/seek handles, staged output handles, mutations, canonicalization, local-path access, backing resources, and capabilities. Default mutation methods fail read-only.
 - `VfsPath`: provider/session identity plus a native `PathBuf` inside that provider. Equality, hashing, ordering, and overlap checks include provider identity. Labels are for display, never path identity or credential storage. Ordinary Unix filenames retain `OsString` bytes.
@@ -36,9 +36,9 @@ Explicit F2 renames use a single-source `Rename` job and `FileSystem::rename_in_
 
 ZIP headers are read without decoding payloads; tar headers are scanned with skipped bodies; 7z/RAR parsers build header metadata. Encrypted headers request a password before listing. With plaintext headers, browsing works without a password and the first encrypted read prompts. Metadata-based selection sizing and filename search work inside archives.
 
-Opening a member creates a decoder worker and a bounded two-chunk channel. Before sending bytes, a validation pass checks the requested content with the password, retrying authentication failures. A successful password is retained only by the archive session. The member is then decoded into the stream. F3 prepares the first bytes while the TUI can handle password requests, then sends the stream to external `cat` stdin. F5 consumes the same interface into a staged destination handle.
+Opening a member creates a decoder worker and a bounded two-chunk channel. Before sending bytes, a validation pass checks the requested content with the password, retrying authentication failures. A successful password is retained only by the archive session. The member is then decoded into the stream. F3 reads this stream in its built-in viewer worker, while the TUI continues handling password requests. Enter/double-click retains the first-byte preparation and external `cat` stdin path. F5 consumes the same interface into a staged destination handle.
 
-No extracted browsing tree or plaintext viewer temporary file is created. Explicitly copying out naturally writes plaintext at the chosen destination. The application's secret buffers use `zeroize`; decoder-internal copies, OS swap, and core dumps are not covered by that guarantee.
+No extracted browsing tree is created. The built-in F3 viewer uses private temporary files for content and styled-row indexes, including plaintext from decrypted archives and remote files; these are removed when the viewer and cancelled workers release them. Its completed snapshots can be memory-mapped safely because no writers remain. Enter/double-click’s external `cat` path and archive seek caches remain memory-only. Explicitly copying out naturally writes plaintext at the chosen destination. The application's secret buffers use `zeroize`; decoder-internal copies, OS swap, and core dumps are not covered by that guarantee.
 
 ## Bounds and limitations
 

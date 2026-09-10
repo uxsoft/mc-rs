@@ -14,7 +14,7 @@ Install a current stable Rust toolchain and libarchive development libraries:
 From this repository:
 
 ```sh
-cargo run --manifest-path mc/Cargo.toml --release -- /path/to/left /path/to/right
+cargo run --release -- /path/to/left /path/to/right
 ```
 
 Both directories are optional and default to the current directory. `--help` and `--version` work without a terminal. Run inside a terminal with keyboard and mouse support.
@@ -27,7 +27,7 @@ mise exec cargo:mc-rs -- mc --version
 mise exec cargo:mc-rs -- mc
 ```
 
-This uses Cargo source installation, avoiding prebuilt-binary lookups (the project does not publish GitHub release binaries). For bare `mc` in Fish, put `mise activate fish | source` in `~/.config/fish/config.fish` and open a new terminal. Version 0.2.6 was verified through an isolated mise source install; the package and executable names differ intentionally.
+This explicitly uses Cargo source installation. Without `MISE_CARGO_BINSTALL=false`, mise can install matching prebuilt GitHub release binaries using the package’s cargo-binstall metadata. For bare `mc` in Fish, put `mise activate fish | source` in `~/.config/fish/config.fish` and open a new terminal. Version 0.2.6 was verified through an isolated mise source install; the package and executable names differ intentionally.
 
 Set your terminal font to a [Nerd Font](https://www.nerdfonts.com/) (use a Mono variant for consistent cell spacing) to display file type icons. Both panels show icons for directories, symlinks, archives, source code, documents, media, and other common file types, including inside archives. Unknown types use a generic file icon. Icons are always enabled; fonts without these glyphs may show empty boxes or unrelated characters.
 
@@ -40,7 +40,7 @@ family = "CaskaydiaMono Nerd Font Mono"
 
 Alacritty inherits this family for bold and italic text unless explicitly overridden. Other terminals need the equivalent font selection in their settings. Open a new terminal after changing it; no `mc` rebuild is needed.
 
-F3 requires `cat` on PATH, including Windows. F4 uses `VISUAL`, then `EDITOR`, then `vi` on Unix or `notepad` on Windows. Editor arguments are parsed as quoted words and invoked directly; shell expressions are not evaluated. `cat` output stays visible until Enter returns to the file manager.
+F3 opens the built-in read-only viewer. Enter/double-click on a regular file requires `cat` on PATH, including Windows. F4 uses `VISUAL`, then `EDITOR`, then `vi` on Unix or `notepad` on Windows. Editor arguments are parsed as quoted words and invoked directly; shell expressions are not evaluated. `cat` output stays visible until Enter returns to the file manager.
 
 Linux and macOS binaries dynamically link libarchive, which must also be installed on the destination machine. [CI run 6](https://github.com/uxsoft/mc-rs/actions/runs/34316119517) passed native builds, Rust tests, and Clippy on Linux x64/ARM64, macOS ARM64, and Windows x64, then published 0.2.6. Interactive remote runtime testing has been performed on Linux x64; other clients still need that coverage.
 
@@ -81,7 +81,7 @@ Linux and macOS binaries dynamically link libarchive, which must also be install
 | Ctrl+R, Ctrl+L | Reload directory, repaint screen |
 | F1 | Help |
 | F2 | Rename highlighted item in place |
-| F3 / F4 | External cat / editor |
+| F3 / F4 | Built-in viewer / external editor |
 | F5 / F6 / F7 / F8 | Copy / move / mkdir / delete |
 | F9 / F10 | Menu / quit |
 
@@ -89,17 +89,45 @@ Esc followed by a digit substitutes for a function key (`0` means F10). Esc foll
 
 Click to focus a panel and position the cursor; right-click toggles selection; double-click opens; the wheel scrolls. The persistent File / View / Go / Help bar opens dropdowns beneath each label. F9 opens File; Left/Right or Tab switch menus, Up/Down select actions, Enter activates, and Esc/F9 dismisses. Mouse hover switches open menus and highlights actions; clicking outside dismisses them. Function-key labels and menu choices are clickable. In deletion dialogs, click the deletion mode, then confirm.
 
+## Built-in file viewer
+
+F3, the clickable **View** function key, and **View → View file** open the highlighted file in a full-screen, read-only viewer. Escape or `q` returns to the same panels, selection, and cursor. Enter/double-click retain their existing directory/archive navigation and external `cat` behavior; F4 retains the external editor.
+
+- Text and code show line numbers, preserve indentation, and scroll in both directions. Code syntax is detected from the filename, extension, or shebang and highlighted with bundled syntaxes. Unknown binary files show hexadecimal bytes and ASCII.
+- Markdown (`.md`, `.markdown`, `.mdown`, `.mkd`, case-insensitive) renders headings, emphasis, lists, task lists, quotes, tables, links, and highlighted fenced code. Prose wraps on resize; code blocks keep their layout. Image references show their descriptions and paths. Links and embedded HTML are inert; viewing never fetches referenced content.
+- Images support PNG, JPEG, GIF, WebP, BMP, TIFF, and ICO. Animated and multi-image files show their first frame/page. Images fit the screen initially.
+- PDFs render actual pages, including raster/scanned content, using the bundled Hayro renderer and fonts. Pages initially fit the width. Encrypted PDFs and unsupported or damaged documents may fail with an error; advanced PDF rendering features are subject to Hayro’s support. No PDF command or additional native rendering library is required.
+- Native Kitty, Sixel, and iTerm2 graphics are used when protocol support and cell dimensions can be detected. Unix terminals receive a bounded capability probe; other platforms use available terminal information and environment hints. Other terminals use colored Unicode half-blocks, which provide much lower resolution, especially for PDF text. All rendering and image encoding happen in background workers.
+
+For fastest photo/PDF rendering, use `cargo run --release -- [LEFT_DIRECTORY] [RIGHT_DIRECTORY]` or the prebuilt release. The development build has additional runtime overhead. Half-block rendering samples the visible image directly at terminal resolution, avoiding an intermediate full-resolution resize.
+
+| Viewer controls | Action |
+| --- | --- |
+| Escape / `q` | Close; cancel pending loading |
+| Up/Down / mouse wheel | Scroll vertically |
+| Left/Right | Scroll horizontally / pan |
+| PageUp/PageDown | Scroll one screen |
+| Home/End | Beginning/end; End follows loading until indexing finishes |
+| `+` / `-` / `0` | Image/PDF zoom in / out / initial fit |
+| `n` / `p` | Next/previous PDF page |
+
+The header shows the format, row or PDF page, and loading/rendering progress. File-operation shortcuts are consumed while viewing. Authentication and background-job conflict prompts still take priority. Image and PDF frames retain their pixel colors even with `NO_COLOR` set; the panels continue to honor that setting.
+
+Large files are not truncated at a preview limit. Text loads progressively into private temporary files with a disk-backed row index and persisted highlighting, so distant navigation does not need to rehighlight preceding lines. A text/code line over 256 KiB remains fully viewable with plain styling; syntax highlighting restarts after that line. Markdown and PDF input use immutable, privately owned mapped snapshots; images and PDFs wait for their input to finish loading. Only visible text rows and one PDF page bitmap are retained for display. Input size is limited by available temporary storage; decoded images and rendered pages are limited to 64 megapixels (256 MiB RGBA), with additional parser/decoder working memory. Reduce zoom if a PDF page exceeds the rendering limit. Errors report failed reads, decoding, or temporary-file writes.
+
+**Temporary storage:** F3 may write decrypted archive or remote content to private, automatically removed temporary files. These files are released when the viewer closes or its workers finish cancellation, including error paths. This changes the old F3 memory-only streaming behavior; archive browsing and its existing seek caches remain memory-only. Temporary data is not encrypted or securely erased, and OS swap/core dumps are outside this guarantee. Cancelling an in-flight network call or decoder may delay worker cleanup, but the file panels return immediately.
+
 ## Archives
 
 Press Enter to browse ZIP-based application files just like ZIP archives: JAR/WAR/EAR; Word DOCX/DOCM/DOTX/DOTM; Excel XLSX/XLSM/XLSB/XLTX/XLTM/XLAM; PowerPoint PPTX/PPTM/POTX/POTM/PPSX/PPSM/PPAM/SLDX/SLDM; Visio VSDX/VSDM/VSSX/VSSM/VSTX/VSTM; and Office THMX themes. Extensions are case-insensitive. F3 views a member and F5 copies it out, including nested archives and remote sources. These files retain their application-specific icons where available. Legacy DOC/XLS/PPT files are not ZIP containers and are not browsable archives. Format references: [JAR](https://docs.oracle.com/javase/8/docs/technotes/guides/jar/index.html) and [Office formats](https://learn.microsoft.com/en-us/office/compatibility/office-file-format-reference).
 
-Enter opens ZIP, RAR, tar, 7z, `.tar.gz`, `.tgz`, or `.gz` in a read-only panel. F5 copies entries to a local destination; F3 views a file via `cat`. Parent navigation at the archive root returns to the containing directory.
+Enter opens ZIP, RAR, tar, 7z, `.tar.gz`, `.tgz`, or `.gz` in a read-only panel. F5 copies entries to a local destination; F3 opens a file in the built-in viewer. Parent navigation at the archive root returns to the containing directory.
 
-Archive panels keep an entry index in memory. Navigation, filename search, and directory sizing use that index; payloads are decoded only when reading/copying a member. `cat` receives a stream on stdin. Copies use the destination provider's staged write handle; local copies need space only for the file being copied, not the whole browsing tree.
+Archive panels keep an entry index in memory. Navigation, filename search, and directory sizing use that index; payloads are decoded only when reading/copying a member. Enter/double-click sends a regular member to `cat` on stdin. F3 uses the built-in viewer described below. Copies use the destination provider's staged write handle; local copies need space only for the file being copied, not the whole browsing tree.
 
 ZIP (AES and ZipCrypto), 7z, and RAR can request a password. Enter submits, Esc cancels; incorrect passwords can be retried. The field is masked and credentials stay in the archive session, never in paths, command arguments, or configuration files. The application's password buffers are zeroized when dropped; decoder libraries may keep their own copies. Passwords are forgotten when the last panel, job, or open handle releases that session.
 
-ZIP uses the Rust `zip` decoder, 7z uses `sevenz-rust2`, RAR uses `rars`, tar uses libarchive, and gzip uses flate2. No archive CLI helpers are needed. ZIP supports stored/deflated content; other compression methods may report unsupported. Multipart archives and archive modification remain unsupported. Nested archives use a memory-only seek cache capped at 64 MiB per member, with at most eight archive levels. Remote and nested RAR inputs are also limited to 64 MiB because the decoder needs an owned input buffer. Larger inputs fail with instructions to copy the archive locally. No plaintext cache is written to disk; cache limits exclude archive indexes, decoder dictionaries, and library-owned copies.
+ZIP uses the Rust `zip` decoder, 7z uses `sevenz-rust2`, RAR uses `rars`, tar uses libarchive, and gzip uses flate2. No archive CLI helpers are needed. ZIP supports stored/deflated content; other compression methods may report unsupported. Multipart archives and archive modification remain unsupported. Nested archives use a memory-only seek cache capped at 64 MiB per member, with at most eight archive levels. Remote and nested RAR inputs are also limited to 64 MiB because the decoder needs an owned input buffer. Larger inputs fail with instructions to copy the archive locally. Archive seek caches never spill plaintext to disk; F3 has separate viewer temporary storage as described above. Cache limits exclude archive indexes, decoder dictionaries, and library-owned copies.
 
 Decoded output uses a bounded channel (two 64 KiB chunks), plus decoder dictionaries and the metadata index. A validation pass precedes streaming the selected member, so password retries cannot release incorrect plaintext; this reads selected content twice. Solid archives can require decoding preceding members too. Compressed tar header scanning and standalone gzip size calculation may require decompressing the compressed stream, without writing it to disk. Some RAR5 transforms need buffered decoding, capped at 32 MiB; decoder dictionary memory is additional.
 
@@ -123,7 +151,7 @@ mc 'ssh://alice@example.com:2222/home/alice' 'ftp://user@files.example.com/publi
 - Existing host keys must match `~/.ssh/known_hosts`; changed keys always fail. For an unknown host, mc displays its SHA256 fingerprint. Verify it independently and type `trust` to accept it for that connection only. It does not modify known_hosts; use your SSH client to record permanent trust. `StrictHostKeyChecking yes` disables session trust and requires a matching known_hosts entry. Each jump host is authenticated and verified separately, with at most eight hops.
 - `ftp://` is plain, unencrypted FTP using passive transfers. It defaults to anonymous login when the user is omitted. Named users get a masked password prompt. FTPS is not implemented. Passwords are rejected in URLs and are never saved in configuration.
 - Paths are absolute on the server. Spaces and URL delimiters can be percent-encoded. UTF-8 names are supported; control characters and backslashes are rejected. Within a remote panel, relative and absolute paths stay on that server. **Go → Local directory** returns to the process's local working directory; `file:///absolute/path` also opens a local location.
-- Browse, select/size directories, search filenames, F3 stream to `cat`, and copy/move/mkdir/permanently delete using the normal keys and background jobs. Remote files have no trash: F8 retains the trash default and explains that permanent deletion must be chosen explicitly. Remote editing and creating remote symlinks are not implemented.
+- Browse, select/size directories, search filenames, F3 view files, and copy/move/mkdir/permanently delete using the normal keys and background jobs. Remote files have no trash: F8 retains the trash default and explains that permanent deletion must be chosen explicitly. Remote editing and creating remote symlinks are not implemented.
 - Uploads are staged on the destination server. SSH publishes with atomic no-replace or explicit replacement; SFTP uses server rename semantics and fails without deleting the old destination if replacement is unsupported. FTP checks for conflicts immediately before rename, but the protocol cannot prevent a race with another client's concurrent changes. Failed connections may leave staging files for manual cleanup. Mutations are never automatically retried.
 - F2 uses a server-side rename for FTP, SFTP, and SSH. SSH requires an atomic no-replace rename primitive on the server (Linux `renameat2` or macOS `renamex_np`); unsupported servers fail without copying or deleting. FTP has the same concurrent-client race described above. If a connection fails during rename, inspect both names before retrying.
 - Transfers involving remote providers check the source byte count, and upload commits verify the staged file size before publication. These checks detect truncation or size changes, not same-size content changes. Failed moves retain their source. Job errors include the staging location if cleanup may need attention. If publication cannot be confirmed after a disconnect, inspect the destination before retrying: the server may already have completed the rename.
@@ -135,21 +163,23 @@ Esc cancels connection/authentication work. Network calls have ten-second socket
 ## Development and validation
 
 ```sh
-cargo fmt --manifest-path mc/Cargo.toml --check
-cargo clippy --manifest-path mc/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path mc/Cargo.toml
-cargo build --manifest-path mc/Cargo.toml
-python3 mc/tests/terminal_smoke.py  # Linux/Unix pseudo-terminal integration test
-python3 mc/tests/archive_smoke.py   # encrypted archives, streamed cat, copy, retry/cancel
-python3 mc/tests/large_directory.py # 20,000 entries, keyboard response, automatic refresh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build
+python3 tests/terminal_smoke.py  # Linux/Unix pseudo-terminal integration test
+python3 tests/archive_smoke.py   # encrypted archives, built-in viewer, copy, retry/cancel
+python3 tests/viewer_smoke.py    # scrolling, Markdown, image/PDF rendering, input isolation
+MC_TEST_GRAPHICS=kitty python3 tests/viewer_smoke.py  # native protocol and repaint regression
+python3 tests/large_directory.py # 20,000 entries, keyboard response, automatic refresh
 # In a Python environment with pip:
-python3 -m pip install -r mc/tests/requirements-remote.txt
-python3 mc/tests/remote_servers.py  # isolated loopback FTP/SFTP/SSH + terminal tests
-python3 mc/tests/openssh_server.py # real OpenSSH; requires openssh-server, run as a normal user
+python3 -m pip install -r tests/requirements-remote.txt
+python3 tests/remote_servers.py  # isolated loopback FTP/SFTP/SSH + terminal tests
+python3 tests/openssh_server.py # real OpenSSH; requires openssh-server, run as a normal user
 ```
 
-Tests use disposable files. The terminal smoke test redirects the Linux trash location to its own temporary directory. It exercises cat, copying, moving, mkdir, both deletion modes, search-result selection, mouse input, resize, and terminal restoration.
+Tests use disposable files. The terminal smoke test redirects the Linux trash location to its own temporary directory. It exercises the built-in viewer, Enter’s external cat behavior, copying, moving, mkdir, both deletion modes, search-result selection, mouse input, resize, and terminal restoration.
 
 ## License and references
 
-GPL-3.0-or-later; see [LICENSE](LICENSE). This project is an independent implementation inspired by [Midnight Commander](https://github.com/MidnightCommander/mc), with behavior checked against its [manual](https://source.midnight-commander.org/man/mc.html). It is not an official Midnight Commander release. RAR and 7z test fixtures come from compress-tools and carry their own MIT notice under `mc/tests/fixtures`.
+GPL-3.0-or-later; see [LICENSE](LICENSE). This project is an independent implementation inspired by [Midnight Commander](https://github.com/MidnightCommander/mc), with behavior checked against its [manual](https://source.midnight-commander.org/man/mc.html). It is not an official Midnight Commander release. RAR and 7z test fixtures come from compress-tools and carry their own MIT notice under `tests/fixtures`.

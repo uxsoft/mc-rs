@@ -25,11 +25,22 @@ name = "mc"
 name = "mc"
 path = "src/main.rs"
 
+# Image decoding and resampling otherwise take seconds per photograph in cargo run.
+# Keep our application debuggable while optimizing the pixel-processing loops.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
 filetime = "0.2"
-ratatui = "0.30"
+ratatui = "0.30.2"
 crossterm = "0.29"
 trash = "5"
 tempfile = "3"
@@ -48,9 +59,16 @@ serde_json = "1"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
 rars = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+pulldown-cmark = "0.13"
+memmap2 = "0.9"
+unicode-width = "0.2"
+hayro = "0.7.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+ratatui-image = { version = "10.0.8", default-features = false, features = ["crossterm"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "event"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

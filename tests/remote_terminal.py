@@ -59,7 +59,7 @@ for key in ["MC_TEST_FTP", "MC_TEST_SFTP", "MC_TEST_SSH"]:
             send(b"\x1b[A"); send(b" ")  # deselect folder; cursor returns to hello.txt
             send(b"\x1bOR")  # F3
             wait_for(lambda: b"hello world" in output)
-            send(b"\r")
+            send(b"\x1b")
             send(b"\x1b[15~"); send(b"\r")  # F5 copy to local panel
             wait_for(lambda: Path(destination, "hello.txt").exists())
             assert Path(destination, "hello.txt").read_text() == "hello world"
@@ -79,4 +79,4 @@ for key in ["MC_TEST_FTP", "MC_TEST_SFTP", "MC_TEST_SSH"]:
             except ProcessLookupError:
                 pass
             os.close(fd)
-print("Remote terminal tests passed: FTP/SFTP/SSH startup, masked retry, selection, cat, copy, exit")
+print("Remote terminal tests passed: FTP/SFTP/SSH startup, masked retry, selection, viewer, copy, exit")

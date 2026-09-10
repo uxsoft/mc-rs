@@ -5,6 +5,7 @@ use crate::{
     panel::Panel,
     ui,
     vfs::{AuthRequest, Context, Kind, Secret, VfsPath, remote},
+    viewer,
 };
 use anyhow::Result;
 use crossterm::event::{
@@ -83,6 +84,9 @@ pub struct App {
     auth_tx: mpsc::Sender<AuthRequest>,
     auth_rx: mpsc::Receiver<AuthRequest>,
     pub viewing: Option<ViewTask>,
+    pub viewer: Option<viewer::Viewer>,
+    pub startup_keys: std::collections::VecDeque<KeyEvent>,
+    pub image_picker: ratatui_image::picker::Picker,
     pub panels: [Panel; 2],
     pub active: usize,
     pub dialog: Option<Dialog>,
@@ -120,6 +124,9 @@ impl App {
             auth_tx,
             auth_rx,
             viewing: None,
+            viewer: None,
+            startup_keys: Default::default(),
+            image_picker: ratatui_image::picker::Picker::halfblocks(),
             panels: [
                 Panel::with_context(left, ctx.clone()),
                 Panel::with_context(right, ctx),
@@ -173,8 +180,32 @@ impl App {
                     self.message("View file", e.to_string());
                 }
             }
-            terminal.draw(|frame| ui::draw(frame, self))?;
-            if event::poll(Duration::from_millis(40))? {
+            let viewer_modal = self.password.is_some()
+                || self
+                    .jobs
+                    .iter()
+                    .any(|job| job.progress.lock().unwrap().conflict.is_some());
+            if let Some(viewer) = &mut self.viewer {
+                let modal_changed = viewer.modal_changed(viewer_modal);
+                let size = terminal.size()?;
+                viewer.resize(size.width, size.height);
+                viewer.poll();
+                if std::mem::take(&mut viewer.redraw) {
+                    viewer::clear_graphics(&self.image_picker)?;
+                    terminal.clear()?;
+                } else if modal_changed {
+                    terminal.clear()?;
+                }
+            }
+            {
+                let _colors = viewer::ImageColors::new(
+                    self.viewer.as_ref().is_some_and(viewer::Viewer::has_image),
+                );
+                terminal.draw(|frame| ui::draw(frame, self))?;
+            }
+            if let Some(key) = self.startup_keys.pop_front() {
+                self.key(key, terminal)?;
+            } else if event::poll(Duration::from_millis(40))? {
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k, terminal)?,
                     Event::Mouse(m) => self.mouse(m, terminal)?,
@@ -229,6 +260,7 @@ impl App {
             && self.connecting.is_none()
             && self.archive.is_none()
             && self.viewing.is_none()
+            && self.viewer.is_none()
             && self.search.is_none()
             && self.menu.is_none()
             && self.quick.is_empty();
@@ -392,6 +424,21 @@ impl App {
         }
         Ok(())
     }
+    fn builtin_view(&mut self) {
+        if self.panel().loading {
+            return;
+        }
+        if let Some(entry) = self.panel().current().filter(|entry| !entry.directory) {
+            self.viewer = Some(viewer::Viewer::open(
+                entry.path.clone(),
+                Context {
+                    auth: Some(self.auth_tx.clone()),
+                    ..Default::default()
+                },
+                self.image_picker.clone(),
+            ));
+        }
+    }
     fn view(&mut self, edit: bool, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         if edit && !self.panel().path.fs.capabilities().write {
             self.message(
@@ -439,7 +486,7 @@ impl App {
     }
     fn function(&mut self, n: u8, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         match n {
-            1 => self.message("Keyboard help", "Tab  Switch panel\n↑ ↓ Home End PgUp PgDn  Navigate\nEnter  Open directory/archive or cat file\nSpace / Insert / Ctrl+T  Select and advance; size directories\n+ / - / *  Select / unselect / invert\nAlt+.  Hidden files    Ctrl+R  Refresh\nAlt+?  Recursive filename search\nType  Jump to filename (1.5s pause starts over)\nCtrl+S / Alt+S  Quick search / next match\nCtrl+U  Swap panels    Alt+O  Other panel to current directory\nF2 rename   F3 cat   F4 editor   F5 copy   F6 move\nF7 mkdir   F8 delete   F9 menu   F10 quit\nEsc then digit is an alternative to F1–F10.\nRight-click selects; double-click opens.\nShell integration and F2 user menus are omitted."),
+            1 => self.message("Keyboard help", "Tab  Switch panel\n↑ ↓ Home End PgUp PgDn  Navigate\nEnter  Open directory/archive or cat file\nSpace / Insert / Ctrl+T  Select and advance; size directories\n+ / - / *  Select / unselect / invert\nAlt+.  Hidden files    Ctrl+R  Refresh\nAlt+?  Recursive filename search\nType  Jump to filename (1.5s pause starts over)\nCtrl+S / Alt+S  Quick search / next match\nCtrl+U  Swap panels    Alt+O  Other panel to current directory\nF2 rename   F3 viewer   F4 editor   F5 copy   F6 move\nF7 mkdir   F8 delete   F9 menu   F10 quit\nViewer: Esc/q close · arrows/wheel scroll · +/- zoom · n/p PDF pages\nEsc then digit is an alternative to F1–F10.\nRight-click selects; double-click opens.\nShell integration and F2 user menus are omitted."),
             2 => {
                 if !self.panel().loading && let Some(entry) = self.panel().current().cloned() {
                     if entry.path.fs.capabilities().write {
@@ -449,7 +496,7 @@ impl App {
                     }
                 }
             }
-            3 => self.view(false, terminal)?, 4 => self.view(true, terminal)?,
+            3 => self.builtin_view(), 4 => self.view(true, terminal)?,
             5 | 6 => { if !self.panel().sources().is_empty() { self.input(if n == 5 { Purpose::Copy } else { Purpose::Move }, if n == 5 { "Copy to" } else { "Move to" }, self.panels[1-self.active].path.display().to_string()); } }
             7 => self.input(Purpose::Mkdir, "Create directory", String::new()),
             8 => { if !self.panel().sources().is_empty() { self.dialog = Some(Dialog::Delete { permanent: false }); } }
@@ -521,6 +568,15 @@ impl App {
             return Ok(());
         }
         if self.conflict_key(k) {
+            return Ok(());
+        }
+        if let Some(viewer) = &mut self.viewer {
+            if viewer.key(k) {
+                self.viewer = None;
+                viewer::clear_graphics(&self.image_picker)?;
+                terminal.clear()?;
+                self.escape = None;
+            }
             return Ok(());
         }
         if let Some(archive) = &self.archive {
@@ -1181,6 +1237,10 @@ impl App {
             }
             return Ok(());
         }
+        if let Some(viewer) = &mut self.viewer {
+            viewer.mouse(m.kind);
+            return Ok(());
+        }
         if self.menu.is_some() {
             if let Some(category) = self
                 .menu_tabs
@@ -1713,5 +1773,49 @@ mod quick_navigation_tests {
             .unwrap();
         assert!(app.dialog.is_none());
         assert!(dir.path().join("beta.txt").exists());
+    }
+    #[test]
+    fn f3_is_read_only_and_preserves_panel_state() {
+        let (dir, mut app) = fixture();
+        let mut term = terminal();
+        app.panel_mut().cursor = app
+            .panel()
+            .entries
+            .iter()
+            .position(|e| !e.directory)
+            .unwrap()
+            + 1;
+        app.panel_mut().toggle();
+        let cursor = app.panel().cursor;
+        let selected = app.panel().selected.clone();
+        let path = app.panel().current().unwrap().path.clone();
+        let original = std::fs::read(path.local_path().unwrap()).unwrap();
+        app.function(3, &mut term).unwrap();
+        assert!(app.viewer.is_some());
+        assert!(app.viewing.is_none());
+        for code in [
+            K::F(2),
+            K::F(4),
+            K::F(5),
+            K::F(8),
+            K::F(10),
+            K::Delete,
+            K::Char('x'),
+            K::Tab,
+        ] {
+            app.key(KeyEvent::new(code, M::NONE), &mut term).unwrap();
+        }
+        assert!(app.dialog.is_none());
+        assert!(app.jobs.is_empty());
+        assert!(!app.quit);
+        assert_eq!(app.active, 0);
+        // The fixed test backend has no real cursor to query during Terminal::clear.
+        // PTY tests verify the actual close/redraw; state restoration precedes that I/O.
+        let _ = app.key(KeyEvent::new(K::Esc, M::NONE), &mut term);
+        assert!(app.viewer.is_none());
+        assert_eq!(app.panel().cursor, cursor);
+        assert_eq!(app.panel().selected, selected);
+        assert_eq!(std::fs::read(path.local_path().unwrap()).unwrap(), original);
+        drop(dir);
     }
 }

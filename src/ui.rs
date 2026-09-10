@@ -72,6 +72,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.height = area.height;
     app.width = area.width;
+    if let Some(viewer) = &mut app.viewer {
+        viewer.draw(frame);
+        draw_priority_overlays(frame, app);
+        return;
+    }
     frame.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
     if area.width < 36 || area.height < 10 {
         frame.render_widget(
@@ -488,6 +493,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         );
         popup(frame, app, "Open archive", text.into(), 7);
     }
+    draw_priority_overlays(frame, app);
+}
+
+fn draw_priority_overlays(frame: &mut Frame, app: &mut App) {
     let conflict = app.jobs.iter().find_map(|j| {
         j.progress
             .lock()

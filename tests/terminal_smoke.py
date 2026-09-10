@@ -71,8 +71,12 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
         assert b'Find filename' in output
         send(b'\x1b')  # close dialog
         send(b'\x1b[B')  # select alpha
-        send(b'\x1bOR')  # F3 cat
-        assert b'cat smoke content' in output
+        send(b'\x1bOR')  # F3 built-in viewer
+        wait_for(lambda: b'cat smoke content' in output and b'Read-only' in output)
+        send(b'\x1b')
+        # Enter still uses external cat.
+        output.clear(); send(b'\r')
+        wait_for(lambda: b'Press Enter to return' in output)
         send(b'\r')
         send(b'\x1bOS')  # F4 missing editor must restore a usable TUI
         assert b'External program' in output
@@ -130,7 +134,7 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
         assert os.waitstatus_to_exitcode(status)==0
         assert b'\x1b[?1049l' in output and b'\x1b[?1000l' in output
         pathlib.Path('/tmp/mc-terminal-smoke.log').write_bytes(output)
-        print('PTY smoke passed: cat, copy, move, mkdir, trash, permanent delete, search, mouse, Space multi-selection, directory sizes, batch copy/move, resize, clean exit')
+        print('PTY smoke passed: built-in viewer, Enter cat, copy, move, mkdir, trash, permanent delete, search, mouse, Space multi-selection, directory sizes, batch copy/move, resize, clean exit')
     finally:
         try: os.kill(pid,signal.SIGKILL)
         except ProcessLookupError: pass

@@ -104,6 +104,8 @@ jobs:
         run: |
           python3 tests/terminal_smoke.py
           python3 tests/archive_smoke.py
+          python3 tests/viewer_smoke.py
+          MC_TEST_GRAPHICS=kitty python3 tests/viewer_smoke.py
           python3 tests/large_directory.py
       - name: Remote VFS protocol and terminal tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'

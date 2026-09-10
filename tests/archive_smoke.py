@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unix PTY check: lazy encrypted archive navigation, masked retry, cat, copy and exit."""
+"""Unix PTY check: lazy encrypted archive navigation, masked retry, viewer, copy and exit."""
 import fcntl
 import os
 import pathlib
@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
         assert b'correct' not in output
         send(b'\r')
         wait_for(lambda: b'archive cat smoke content' in output)
-        send(b'\r')
+        send(b'\x1b')
         output.clear(); send(b'\x1b[15~'); send(b'\r')  # F5 reuses password.
         wait_for(lambda: (right / 'secret.txt').exists())
         assert (right / 'secret.txt').read_bytes() == b'archive cat smoke content\n'
@@ -74,11 +74,11 @@ with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
         # Reopening starts a fresh session; cancel its password prompt safely.
         send(b'\x1b[B'); send(b'\r'); send(b'\x1b[B'); send(b'\r'); send(b'\x1b[B')
         output.clear(); send(b'\x1bOR'); wait_for(lambda: b'Unlock archive' in output)
-        send(b'\x1b'); pump(.3); send(b'\r')
+        send(b'\x1b'); pump(.3); send(b'\x1b')
         send(b'\x1b[21~'); pump(.3)
         result = os.waitpid(pid, os.WNOHANG)
         assert result[0] == pid and os.waitstatus_to_exitcode(result[1]) == 0, output[-4000:]
-        print('Archive PTY passed: metadata size, masked password retry/cancel, cat stream, cached password, copy, read-only guard, parent exit')
+        print('Archive PTY passed: metadata size, masked password retry/cancel, built-in viewer, cached password, copy, read-only guard, parent exit')
     finally:
         try: os.kill(pid, signal.SIGKILL)
         except ProcessLookupError: pass

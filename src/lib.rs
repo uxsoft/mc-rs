@@ -7,3 +7,5 @@ pub mod panel;
 pub mod ui;
 
 pub mod vfs;
+
+pub mod viewer;
