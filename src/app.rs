@@ -1446,13 +1446,19 @@ mod quick_navigation_tests {
         )
         .unwrap()
     }
+    // Windows reserves `?` in filenames; `[` is glob punctuation that is legal there.
+    #[cfg(windows)]
+    const PUNCTUATED: &str = "a[literal";
+    #[cfg(not(windows))]
+    const PUNCTUATED: &str = "a?literal";
+
     fn fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         for name in [
             "Alpha.txt",
             "Alpine.txt",
             "beta.txt",
-            "a?literal",
+            PUNCTUATED,
             "Éclair.txt",
         ] {
             std::fs::write(dir.path().join(name), name).unwrap();
@@ -1501,8 +1507,8 @@ mod quick_navigation_tests {
         app.key(KeyEvent::new(K::Backspace, M::NONE), &mut terminal)
             .unwrap();
         assert!(app.quick.is_empty());
-        type_text(&mut app, &mut terminal, "a?");
-        assert_eq!(name(&app), "a?literal"); // Auto navigation treats punctuation literally.
+        type_text(&mut app, &mut terminal, &PUNCTUATED[..2]);
+        assert_eq!(name(&app), PUNCTUATED); // Auto navigation treats punctuation literally.
         app.clear_quick();
         type_text(&mut app, &mut terminal, "z");
         assert_eq!(name(&app), "Zoo");
