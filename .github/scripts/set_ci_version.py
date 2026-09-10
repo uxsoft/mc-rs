@@ -9,10 +9,8 @@ from pathlib import Path
 def stamp(root: Path, run_number: str) -> str:
     if not re.fullmatch(r"[1-9][0-9]*", run_number):
         raise ValueError("GITHUB_RUN_NUMBER must be a positive integer")
-    if (root / "LICENSE").read_bytes() != (root / "mc/LICENSE").read_bytes():
-        raise ValueError("Keep mc/LICENSE synchronized with the root LICENSE")
-    manifest_path = root / "mc/Cargo.toml"
-    lock_path = root / "mc/Cargo.lock"
+    manifest_path = root / "Cargo.toml"
+    lock_path = root / "Cargo.lock"
     manifest = manifest_path.read_text()
     lock = lock_path.read_text()
     package = tomllib.loads(manifest)["package"]

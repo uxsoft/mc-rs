@@ -11,11 +11,8 @@ class VersionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / 'mc').mkdir()
-        for name in ['LICENSE', 'mc/LICENSE']:
-            (self.root / name).write_text('same license')
-        self.manifest = self.root / 'mc/Cargo.toml'
-        self.lock = self.root / 'mc/Cargo.lock'
+        self.manifest = self.root / 'Cargo.toml'
+        self.lock = self.root / 'Cargo.lock'
         self.manifest.write_text('[package]\nname = "mc-rs"\nversion = "0.1.0"\n\n[dependencies]\nother = "0.1.0"\n')
         self.lock.write_text('version = 4\n\n[[package]]\nname = "mc-rs"\nversion = "0.1.0"\n\n[[package]]\nname = "other"\nversion = "0.1.0"\n')
 
@@ -46,11 +43,6 @@ class VersionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             stamp(self.root, '42')
         self.assertEqual(before, self.manifest.read_bytes())
-
-    def test_rejects_license_drift(self):
-        (self.root / 'mc/LICENSE').write_text('different')
-        with self.assertRaises(ValueError):
-            stamp(self.root, '42')
 
 
 if __name__ == '__main__':
