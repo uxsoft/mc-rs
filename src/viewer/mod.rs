@@ -350,6 +350,11 @@ impl Viewer {
         } else {
             r.left
         };
+        let page = if r.id == self.current.id {
+            self.current.page
+        } else {
+            r.page
+        };
         match key.code {
             KeyCode::Up => r.top = top.saturating_sub(1),
             KeyCode::Down => r.top = top.saturating_add(1),
@@ -363,16 +368,14 @@ impl Viewer {
             KeyCode::Left => r.left = left.saturating_sub(4),
             KeyCode::Right => r.left = left.saturating_add(4),
             KeyCode::Char('n') if self.graphics => {
-                r.page = self
-                    .current
-                    .page
+                r.page = page
                     .saturating_add(1)
                     .min(self.current.pages.saturating_sub(1));
                 r.top = 0;
                 r.left = 0;
             }
             KeyCode::Char('p') if self.graphics => {
-                r.page = self.current.page.saturating_sub(1);
+                r.page = page.saturating_sub(1);
                 r.top = 0;
                 r.left = 0;
             }
@@ -488,7 +491,7 @@ impl Viewer {
                 "Esc/q Close · Arrows/Wheel Scroll · PgUp/Dn Page · Home/End"
             };
             let footer = if let Some(note) = source.note {
-                format!("{controls} · {note}")
+                format!("{note} · {controls}")
             } else {
                 controls.into()
             };
@@ -559,39 +562,7 @@ fn load(path: VfsPath, ctx: &Context, shared: &Mutex<Source>, revision: &AtomicU
                 }
                 shared.lock().unwrap().bytes = offset;
             } else {
-                let syntax = match &format {
-                    Format::Code(name) => text::syntaxes().find_syntax_by_name(name),
-                    _ => None,
-                };
-                let mut highlighter = syntax.map(text::highlighter);
-                let mut long_line = false;
-                loop {
-                    ctx.check()?;
-                    let bytes = fragment(&mut reader)?;
-                    if bytes.is_empty() {
-                        break;
-                    }
-                    let value = String::from_utf8_lossy(&bytes);
-                    let ends = bytes.ends_with(b"\n");
-                    let too_long = long_line || bytes.len() >= LINE_LIMIT;
-                    let mut store = store.lock().unwrap();
-                    if !too_long && let Some(h) = &mut highlighter {
-                        text::highlight(&mut store, &value, h)?;
-                    } else {
-                        store.write(&value, Ink::default(), None)?;
-                    }
-                    drop(store);
-                    if too_long {
-                        shared.lock().unwrap().note =
-                            Some("Very long lines use plain styling".into());
-                        if ends {
-                            highlighter = syntax.map(text::highlighter);
-                        }
-                    }
-                    long_line = too_long && !ends;
-                    shared.lock().unwrap().bytes += bytes.len() as u64;
-                    revision.fetch_add(1, Ordering::Release);
-                }
+                index_text(&mut reader, &format, &store, ctx, shared, revision)?;
             }
             store.lock().unwrap().finish()?;
         }
@@ -610,8 +581,73 @@ fn load(path: VfsPath, ctx: &Context, shared: &Mutex<Source>, revision: &AtomicU
                 revision.fetch_add(1, Ordering::Release);
             }
             file.flush()?;
-            shared.lock().unwrap().snapshot = Some(Arc::new(Snapshot::new(file)?));
+            // Check actual completed input, never the provider's advertised size.
+            if format == Format::Markdown && file.metadata()?.len() > MARKDOWN_STYLING_LIMIT {
+                use std::io::{Seek, SeekFrom};
+                file.seek(SeekFrom::Start(0))?;
+                let store = Arc::new(Mutex::new(Store::new()?));
+                {
+                    let mut state = shared.lock().unwrap();
+                    state.store = Some(store.clone());
+                    state.note = Some("Plain text: Markdown styling limit exceeded".into());
+                    state.bytes = 0;
+                }
+                index_text(
+                    &mut BufReader::new(file),
+                    &Format::Text,
+                    &store,
+                    ctx,
+                    shared,
+                    revision,
+                )?;
+                store.lock().unwrap().finish()?;
+            } else {
+                shared.lock().unwrap().snapshot = Some(Arc::new(Snapshot::new(file)?));
+            }
         }
+    }
+    Ok(())
+}
+const MARKDOWN_STYLING_LIMIT: u64 = 1024 * 1024;
+fn index_text(
+    reader: &mut impl BufRead,
+    format: &Format,
+    store: &Mutex<Store>,
+    ctx: &Context,
+    shared: &Mutex<Source>,
+    revision: &AtomicU64,
+) -> Result<()> {
+    let syntax = match format {
+        Format::Code(name) => text::syntaxes().find_syntax_by_name(name),
+        _ => None,
+    };
+    let mut highlighter = syntax.map(text::highlighter);
+    let mut long_line = false;
+    loop {
+        ctx.check()?;
+        let bytes = fragment(reader)?;
+        if bytes.is_empty() {
+            break;
+        }
+        let value = String::from_utf8_lossy(&bytes);
+        let ends = bytes.ends_with(b"\n");
+        let too_long = long_line || bytes.len() >= LINE_LIMIT;
+        let mut store = store.lock().unwrap();
+        if !too_long && let Some(h) = &mut highlighter {
+            text::highlight(&mut store, &value, h)?;
+        } else {
+            store.write(&value, Ink::default(), None)?;
+        }
+        drop(store);
+        if too_long && syntax.is_some() {
+            shared.lock().unwrap().note = Some("Very long lines use plain styling".into());
+            if ends {
+                highlighter = syntax.map(text::highlighter);
+            }
+        }
+        long_line = too_long && !ends;
+        shared.lock().unwrap().bytes += bytes.len() as u64;
+        revision.fetch_add(1, Ordering::Release);
     }
     Ok(())
 }
@@ -917,6 +953,62 @@ mod tests {
     use ratatui_image::Image;
     use std::{path::Path, time::Instant};
 
+    #[test]
+    fn markdown_styling_limit_preserves_complete_plain_text_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.MD");
+        for size in [
+            MARKDOWN_STYLING_LIMIT - 1,
+            MARKDOWN_STYLING_LIMIT,
+            MARKDOWN_STYLING_LIMIT + 1,
+        ] {
+            let mut bytes = vec![b'a'; size as usize - 5];
+            bytes.extend_from_slice(b"\nlast");
+            std::fs::write(&path, bytes).unwrap();
+            let shared = source();
+            load(
+                local(&path),
+                &Context::default(),
+                &shared,
+                &AtomicU64::new(0),
+            )
+            .unwrap();
+            let state = shared.into_inner().unwrap();
+            if size <= MARKDOWN_STYLING_LIMIT {
+                assert!(state.snapshot.is_some());
+                assert!(state.store.is_none());
+            } else {
+                assert!(state.snapshot.is_none()); // Markdown parser cannot receive this input.
+                assert_eq!(
+                    state.note.as_deref(),
+                    Some("Plain text: Markdown styling limit exceeded")
+                );
+                let mut store = state.store.as_ref().unwrap().lock().unwrap();
+                assert_eq!(store.rows, 2);
+                assert_eq!(row(&store.line(1, 0, 20).unwrap()), "last");
+                drop(store);
+                let weak = Arc::downgrade(state.store.as_ref().unwrap());
+                let mut cache = RenderCache::default();
+                for width in [20, 80] {
+                    let mut request = request();
+                    request.width = width;
+                    request.top = u64::MAX;
+                    let reply = render(
+                        request,
+                        &state,
+                        &mut cache,
+                        &Picker::halfblocks(),
+                        &Context::default(),
+                    )
+                    .unwrap();
+                    assert!(reply.lines.iter().any(|line| row(line).contains("last")));
+                    assert!(cache.markdown.is_none());
+                }
+                drop(state);
+                assert!(weak.upgrade().is_none());
+            }
+        }
+    }
     #[test]
     #[ignore = "manual image rendering benchmark; set MC_TEST_IMAGE to a local image"]
     fn image_render_timing() {
@@ -1335,6 +1427,36 @@ mod tests {
                     .iter()
                     .all(|cell| cell.bg == expected)
             );
+        }
+    }
+    #[test]
+    fn rapid_page_navigation_uses_pending_page_and_clamps() {
+        let mut current = Reply::empty(1);
+        current.pages = 4;
+        let mut viewer = Viewer {
+            title: "pages.pdf".into(),
+            ctx: Context::default(),
+            source: Arc::new(source()),
+            desired: Arc::new(Mutex::new(request())),
+            result: Arc::new(Mutex::new(None)),
+            current,
+            redraw: false,
+            graphics: true,
+            modal: false,
+        };
+        for _ in 0..2 {
+            viewer.key(KeyEvent::from(KeyCode::Char('n')));
+        }
+        assert_eq!(viewer.desired.lock().unwrap().page, 2);
+        viewer.key(KeyEvent::from(KeyCode::Char('p')));
+        assert_eq!(viewer.desired.lock().unwrap().page, 1);
+        for (key, expected) in [('n', 3), ('p', 0)] {
+            for _ in 0..8 {
+                viewer.key(KeyEvent::from(KeyCode::Char(key)));
+            }
+            let request = viewer.desired.lock().unwrap();
+            assert_eq!(request.page, expected);
+            assert_eq!((request.top, request.left), (0, 0));
         }
     }
     #[test]

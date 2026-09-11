@@ -1,7 +1,7 @@
 # mc — implementation plan and session handoff
 
-Last updated: 2026-09-09
-Current phase: Main proposals 3–7 implemented and verified on Linux x64; changes remain local. Published 0.2.6 and all four native CI build/test jobs verified. Interactive remote runtime coverage outside Linux x64 remains pending.
+Last updated: 2026-09-11
+Current phase: All twelve review fixes implemented and Linux regression checks passed. Hosted four-platform CI and live native-terminal visual checks have not been run for these changes. Earlier dated entries record historical behavior and checks, not current validation.
 
 ## Working agreement
 
@@ -20,7 +20,9 @@ Current phase: Main proposals 3–7 implemented and verified on Linux x64; chang
 - Platforms: Linux x86_64 and ARM64, macOS ARM64, Windows x86_64.
 - Support background file operations with progress and cancellation.
 - Delete dialog offers trash or permanent deletion; trash is the default.
-- View files using the external `cat` command. Assume `cat` is available on Windows too. Do not implement a built-in viewer or editor.
+- F3 and View file open the read-only built-in viewer for local, remote, and archive files. Enter/double-click retain external `cat` (also required on Windows); F4 retains the external editor. No built-in editor.
+- Viewer snapshots and indexes use private, automatically cleaned temporary disk storage, which can contain decrypted archive or remote content. Archive browsing caches keep their existing behavior.
+- Markdown styling is limited to inputs at most 1 MiB; larger Markdown files remain completely browsable as disk-backed plain text. This bounds parser input, not total RAM.
 - No MC shell functionality: no command prompt, persistent subshell, Ctrl+O shell switching, or command execution interface. Directly launching the viewer/editor is still in scope.
 - Required archive formats: ZIP, RAR, tar, 7z, and gzip.
 - Filename search only; no content search.
@@ -105,7 +107,7 @@ Select exact dependency versions during implementation from current official doc
 - M1 must establish workable ZIP, RAR, tar, 7z, and gzip backends on all four targets. Prefer maintained libraries when suitable; external helpers are acceptable only with documented availability and actionable missing-helper errors. Only `cat` is currently assumed installed by the user.
 - Enter opens an archive as a browsable location; copying entries to a local panel extracts them through the job engine. Moving/deleting archive entries is unavailable in the initial read-only model.
 - Validate extracted paths, links, and destination traversal to prevent writing outside the chosen destination. Handle malicious absolute paths, `..`, and symlink escapes.
-- Stream archive members to external `cat` stdin or a staged destination handle. Do not extract a browsing tree or create plaintext viewer temporary files. Archive editing remains unavailable.
+- Stream archive members to external `cat` stdin or a staged destination handle. Do not extract a browsing tree. Built-in viewing may use private plaintext temporary snapshots and indexes. Archive editing remains unavailable.
 - ZIP AES/ZipCrypto, 7z AES, and RAR password handling use masked prompts and session credentials. Multipart archives remain unsupported; decoder errors and capability limits are explicit.
 
 ### External processes and terminal ownership
@@ -157,7 +159,7 @@ Acceptance: real operations succeed in disposable test directories; tests cover 
 ### M4 — Filename search and external tools (implemented; Linux smoke verified)
 
 - [x] Add recursive, cancellable filename search and result navigation.
-- [x] Implement F3 external `cat` viewing with readable output and return-to-TUI flow.
+- [x] F3 opens the built-in read-only viewer; Enter/double-click retain external `cat` with return-to-TUI flow.
 - [x] Implement F4 external editor launching for local files.
 - [x] Verify terminal recovery after cat and missing-editor failures.
 - [ ] Verify concurrent background job completion/conflicts while external tools own the terminal.
@@ -169,7 +171,7 @@ Acceptance: search remains responsive; viewer/editor paths containing spaces wor
 - [x] Browse and extract ZIP, RAR, tar, and 7z.
 - [x] Decompress gzip streams and browse/extract `.tar.gz`.
 - [x] Route extraction through background jobs with progress/cancellation where backend permits.
-- [x] View archive files through a bounded VFS stream into `cat` stdin (supersedes temporary extraction).
+- [x] Enter/double-click stream archive members into `cat`; F3 uses private temporary viewer storage.
 - [x] Reject unsafe extraction paths and clearly disable unsupported mutations.
 - [x] Document format variants, encrypted/multipart limitations, and any runtime helpers.
 
@@ -281,16 +283,14 @@ crates.io publishing follow-up:
 
 ## Next session
 
-1. Read this plan and README; inspect current changes before editing.
-2. Review the local transfer-hardening and proposals 3–7 changes and their validation entries below before committing/pushing. CI run 6 has verified the prior remote implementation on all four native build/test targets and published 0.2.6; the new checks still need hosted execution after pushing.
-3. Complete M6 interactive runtime checks for Linux ARM64, macOS ARM64, and Windows x64. Build/test success and artifacts are verified; remote terminal behavior outside Linux x64 is not.
-4. Exercise larger real-world directories and archives interactively; expand tests only for failures or unresolved concerns. Audit the supported shortcut subset against the manual as functionality expands.
-5. Main proposals 3–7 are implemented; review the newest validation entry below. Next candidates are interactive remote checks on other native clients, system/full SSH config semantics and certificates, byte-level transfer resume, incremental archive indexing, and large archives beyond the bounded cache. Optional FTPS, remote editing and bookmarks have not been implemented.
+1. Review the twelve fixes and latest validation entry at the end of this file. Changes remain uncommitted.
+2. Run the existing four-platform hosted matrix after these changes are committed/pushed, and perform native-terminal visual checks. Earlier hosted runs do not validate these fixes.
+3. Run the OpenSSH-server suite when `sshd` is available; FTP/SFTP/SSH helper and terminal suites already passed against isolated fixtures.
 
 Run locally from the repository root:
 
 ```sh
-cargo run --manifest-path mc/Cargo.toml --release -- /left/directory /right/directory
+cargo run --release -- /left/directory /right/directory
 ```
 
 Deferred backlog: FTPS, remote editing/bookmarks, complete/system SSH config and certificate support, byte-level transfer resume, remote/nested RAR beyond 64 MiB, and stronger FTP publication guarantees. Archive creation/modification only if requested later.
@@ -396,3 +396,12 @@ Deferred backlog: FTPS, remote editing/bookmarks, complete/system SSH config and
 - Added case-insensitive ZIP-container recognition for JAR/WAR/EAR, modern Word/Excel/PowerPoint documents, templates, macro-enabled variants and add-ins, XLSB, Visio packages, and THMX themes. Recognition and decoder selection share one extension list so Enter opens the existing ZIP VFS rather than cat or another archive decoder. Legacy DOC/XLS/PPT remain excluded.
 - Reused lazy read-only browsing, member streaming/copy, nested mounts, and nonlocal providers without new dependencies or extraction. Java archives use the archive icon; added Office variants to their existing document/spreadsheet/presentation icon categories. README lists supported extensions and links to upstream format references.
 - Validation passed: all 49 standard Rust tests, strict Clippy, formatting, debug build, and diff checks. New coverage opens all added aliases, checks case-insensitive names/read-only member access, mounts a DOCX inside a JAR and copies its member, and extends the independent in-memory VFS contract across JAR/DOCX/PPTX/XLSX. No additional live network tests were needed for extension dispatch. Changes remain uncommitted with the preceding navigation/rename work.
+
+
+2026-09-11 — review fixes in progress:
+- Updated current viewer and temporary-storage requirements (#12). Dated progress entries above remain historical; their external-F3 and storage descriptions have been superseded.
+- Implemented in the approved sequence: pending PDF page navigation (#7); typed transfer decisions (#9); labeled job status row (#4); shared enqueue/retry validation (#8); single-row search geometry (#5); frozen Copy/Move/Delete sources (#1); complete plain-text fallback above the 1 MiB Markdown styling limit (#11); selected-block 7z decoding (#3); shared bounded PTY harness and viewport/native-row image assertions (#10); grapheme-aware storage/wrapping/clipping (#6); provider-specific normalization with conservative alias locks (#2).
+- Focused tests cover pending page keys, conflict decisions, skipped directory moves, original-source retention after refresh and delayed destination resolution, retry overlap feedback, status rendering, search resize/hit testing, Markdown boundaries and final-row access, corrupt independent 7z blocks, grapheme/style/chunk boundaries, and symlink-parent paths/locks.
+- Validation passed: 82 Rust tests (three separately gated tests ignored), strict Clippy, formatting, release build, local/archive/image PTYs on both debug and release binaries, the large-directory PTY, FTP/SFTP/SSH protocol and terminal suites, four CI-version tests and two shared-harness tests.
+- A 16 MiB repetitive Markdown experiment reached its final row through the plain-text fallback; Linux reported 25,312 KiB peak RSS for the debug process. This is an observed workload measurement, not a promised memory cap. The fallback notice is placed before controls so it remains visible on narrower screens.
+- Unavailable here: native Linux ARM64, macOS ARM64, Windows x64 CI runners; OpenSSH server executable; live Ghostty/native graphics visual inspection. PTY tests exercise native Kitty output deterministically but are not a live-terminal visual check.

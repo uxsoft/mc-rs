@@ -25,6 +25,12 @@ pub enum Decision {
     SkipAll,
     Cancel,
 }
+#[derive(Debug, PartialEq, Eq)]
+enum TransferDecision {
+    Create,
+    Overwrite,
+    Skip,
+}
 pub struct Conflict {
     pub path: VfsPath,
     pub reply: mpsc::Sender<Decision>,
@@ -38,6 +44,7 @@ pub struct Progress {
     pub files: u64,
     pub current: String,
     pub done: bool,
+    pub cancelled: bool,
     pub error: Option<String>,
     pub conflict: Option<Conflict>,
 }
@@ -76,10 +83,10 @@ impl Worker {
         }
         Ok(())
     }
-    fn overwrite(&mut self, path: &VfsPath) -> Result<bool> {
+    fn overwrite(&mut self, path: &VfsPath) -> Result<TransferDecision> {
         self.check()?;
         if lookup(path, &self.ctx)?.is_none() {
-            return Ok(false);
+            return Ok(TransferDecision::Create);
         }
         let decision = if let Some(d) = self.policy {
             d
@@ -101,16 +108,19 @@ impl Worker {
         match decision {
             Decision::OverwriteAll => {
                 self.policy = Some(decision);
-                Ok(true)
+                Ok(TransferDecision::Overwrite)
             }
-            Decision::Overwrite => Ok(true),
+            Decision::Overwrite => Ok(TransferDecision::Overwrite),
             Decision::Skip | Decision::SkipAll => {
                 if matches!(decision, Decision::SkipAll) {
                     self.policy = Some(decision);
                 }
-                bail!("SKIP")
+                Ok(TransferDecision::Skip)
             }
-            Decision::Cancel => bail!("Cancelled"),
+            Decision::Cancel => {
+                self.ctx.cancel.store(true, Ordering::Relaxed);
+                bail!("Cancelled")
+            }
         }
     }
     fn copy(&mut self, from: &VfsPath, to: &VfsPath) -> Result<bool> {
@@ -135,10 +145,10 @@ impl Worker {
         if !matches!(meta.kind, Kind::File | Kind::Symlink) {
             bail!("Unsupported special file: {from}");
         }
-        let overwrite = match self.overwrite(to) {
-            Ok(v) => v,
-            Err(e) if e.to_string() == "SKIP" => return Ok(false),
-            Err(e) => return Err(e),
+        let overwrite = match self.overwrite(to)? {
+            TransferDecision::Create => false,
+            TransferDecision::Overwrite => true,
+            TransferDecision::Skip => return Ok(false),
         };
         if overwrite && to.metadata(false, &self.ctx)?.kind == Kind::Directory {
             bail!("Cannot overwrite a directory with a file");
@@ -227,7 +237,7 @@ pub fn retry(job: &Job, ctx: VfsContext) -> Job {
         true,
     )
 }
-fn start_inner(
+pub(crate) fn start_inner(
     op: Operation,
     sources: Vec<VfsPath>,
     destination: VfsPath,
@@ -349,6 +359,7 @@ fn start_inner(
         })();
         let mut p = progress.lock().unwrap();
         p.done = true;
+        p.cancelled = result.is_err() && cancel.load(Ordering::Relaxed);
         p.conflict = None;
         p.error = result.err().map(|e| format!("{e:#}"));
     });
@@ -399,4 +410,33 @@ pub fn resources(op: Operation, sources: &[VfsPath], destination: &VfsPath) -> V
 pub fn overlaps(a: &[VfsPath], b: &[VfsPath]) -> bool {
     a.iter()
         .any(|a| b.iter().any(|b| a.starts_with(b) || b.starts_with(a)))
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+    #[test]
+    fn conflicts_are_typed_and_cancellation_is_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path: VfsPath = dir.path().join("target").into();
+        let mut worker = Worker {
+            progress: Arc::new(Mutex::new(Progress::default())),
+            ctx: VfsContext::default(),
+            policy: Some(Decision::Skip),
+        };
+        assert_eq!(worker.overwrite(&path).unwrap(), TransferDecision::Create);
+        std::fs::write(&path.path, "original").unwrap();
+        for (decision, expected) in [
+            (Decision::Skip, TransferDecision::Skip),
+            (Decision::SkipAll, TransferDecision::Skip),
+            (Decision::Overwrite, TransferDecision::Overwrite),
+            (Decision::OverwriteAll, TransferDecision::Overwrite),
+        ] {
+            worker.policy = Some(decision);
+            assert_eq!(worker.overwrite(&path).unwrap(), expected);
+        }
+        worker.policy = Some(Decision::Cancel);
+        assert!(worker.overwrite(&path).is_err());
+        assert!(worker.ctx.cancel.load(Ordering::Relaxed));
+    }
 }

@@ -85,3 +85,6 @@ Local staged files set mtime before publication and directories after children. 
 SSH configuration and MFA behavior were checked against [OpenSSH ssh_config](https://man.openbsd.org/ssh_config) and [ssh2 keyboard-interactive callbacks](https://docs.rs/ssh2/0.9.6/ssh2/trait.KeyboardInteractivePrompt.html).
 
 `tests/proposals.rs` covers metadata, restart/conflict semantics, encrypted nested ZIP/RAR, seek bounds/cancellation, and delivery before a listing completes. `jobs_terminal.py` exercises selected-job cancellation, concurrent independent jobs, speed/ETA, and explicit retry/re-authentication against a throttled SFTP server. `large_directory.py` checks 20,000 local entries, keyboard response, idle automatic refresh and clean shutdown. The OpenSSH fixture tests both direct aliases/custom keys and ProxyJump; Paramiko tests MFA and session-only host confirmation, including strict rejection.
+
+
+Path normalization is provider-specific. Filesystem paths retain `..` components because resolving them may cross symlinks; archive paths collapse them within their virtual root. URL parsing keeps standard URL dot-segment rules. Local resource locks resolve existing ancestors, including symlinks, before appending missing destination leaves. If an alias cannot be resolved safely, its lock conservatively covers the filesystem root.

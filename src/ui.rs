@@ -4,6 +4,7 @@ use crate::{
 };
 use ratatui::{prelude::*, widgets::*};
 use std::sync::atomic::Ordering;
+use unicode_segmentation::UnicodeSegmentation;
 mod icons;
 const BG: Color = Color::Rgb(19, 23, 31);
 const FG: Color = Color::Rgb(210, 219, 230);
@@ -26,23 +27,54 @@ fn clip_line(value: &str, width: usize) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>();
-    if Span::raw(&clean).width() <= width {
+    if clean
+        .graphemes(true)
+        .map(|g| Span::raw(g).width())
+        .sum::<usize>()
+        <= width
+    {
         return clean;
     }
     let mut out = String::new();
     let mut used = 0;
-    for c in clean.chars() {
-        let n = Span::raw(c.to_string()).width();
+    for c in clean.graphemes(true) {
+        let n = Span::raw(c).width();
         if used + n > width.saturating_sub(1) {
             break;
         }
-        out.push(c);
+        out.push_str(c);
         used += n;
     }
     if width > 0 {
         out.push('…');
     }
     out
+}
+pub(crate) struct SearchViewport {
+    pub popup: Rect,
+    pub results: Rect,
+    pub start: usize,
+}
+pub(crate) fn search_viewport(area: Rect, cursor: usize) -> SearchViewport {
+    let width = area.width.saturating_sub(4).min(86);
+    let height = 19.min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let results = Rect::new(
+        popup.x + 1,
+        popup.y + 2,
+        width.saturating_sub(2),
+        height.saturating_sub(4),
+    );
+    SearchViewport {
+        popup,
+        results,
+        start: cursor.saturating_sub(usize::from(results.height).saturating_sub(1)),
+    }
 }
 fn popup(frame: &mut Frame, app: &mut App, title: &str, text: Text<'_>, height: u16) {
     let area = frame.area();
@@ -89,6 +121,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(5),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(area);
@@ -281,7 +314,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
     }
-    let buttons = Layout::horizontal([Constraint::Ratio(1, 10); 10]).split(rows[2]);
+    let (label, message, color) = match &app.status {
+        crate::app::Status::Info(text) => ("Info", text, FG),
+        crate::app::Status::Cancelled(text) => ("Cancelled", text, Color::Yellow),
+        crate::app::Status::Failure(text) => ("Failed", text, Color::LightRed),
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{label}: {message}")).style(Style::default().fg(color).bg(BG)),
+        rows[2],
+    );
+    let buttons = Layout::horizontal([Constraint::Ratio(1, 10); 10]).split(rows[3]);
     for (i, label) in [
         "Help", "Rename", "View", "Edit", "Copy", "Move", "Mkdir", "Delete", "Menu", "Quit",
     ]
@@ -299,32 +341,69 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Some(search) = &app.search {
         let results = search.results.lock().unwrap();
-        let start = search.cursor.saturating_sub(8);
-        let mut lines = vec![Line::from(format!(
-            "{} matches · {} · {} unreadable · cap 100,000",
-            results.len(),
-            if search.done.load(Ordering::Relaxed) {
-                "finished"
-            } else {
-                "searching"
-            },
-            *search.errors.lock().unwrap()
-        ))];
-        for (i, p) in results.iter().enumerate().skip(start).take(14) {
-            lines.push(Line::styled(
-                format!(
-                    "{} {}",
-                    if i == search.cursor { "›" } else { " " },
-                    p.display()
+        let view = search_viewport(area, search.cursor);
+        app.dialog_area = view.popup;
+        frame.render_widget(Clear, view.popup);
+        frame.render_widget(
+            Block::bordered()
+                .title("Find files")
+                .style(Style::default().fg(FG).bg(BG)),
+            view.popup,
+        );
+        frame.render_widget(
+            Paragraph::new(clip_line(
+                &format!(
+                    "{} matches · {} · {} unreadable · cap 100,000",
+                    results.len(),
+                    if search.done.load(Ordering::Relaxed) {
+                        "finished"
+                    } else {
+                        "searching"
+                    },
+                    *search.errors.lock().unwrap()
                 ),
-                Style::default().fg(if i == search.cursor { ACCENT } else { FG }),
-            ));
+                usize::from(view.results.width),
+            )),
+            Rect::new(view.results.x, view.popup.y + 1, view.results.width, 1),
+        );
+        for (row, (i, path)) in results
+            .iter()
+            .enumerate()
+            .skip(view.start)
+            .take(usize::from(view.results.height))
+            .enumerate()
+        {
+            frame.render_widget(
+                Paragraph::new(clip_line(
+                    &format!(
+                        "{} {}",
+                        if i == search.cursor { "›" } else { " " },
+                        path.display()
+                    ),
+                    usize::from(view.results.width),
+                ))
+                .style(Style::default().fg(if i == search.cursor {
+                    ACCENT
+                } else {
+                    FG
+                })),
+                Rect::new(
+                    view.results.x,
+                    view.results.y + row as u16,
+                    view.results.width,
+                    1,
+                ),
+            );
         }
-        lines.push(Line::from(
-            "Enter: go to result   Ctrl+C: stop   Esc: close",
-        ));
-        drop(results);
-        popup(frame, app, "Find files", Text::from(lines), 19);
+        frame.render_widget(
+            Paragraph::new("Enter: go   Ctrl+C: stop   Esc: close"),
+            Rect::new(
+                view.results.x,
+                view.popup.bottom().saturating_sub(2),
+                view.results.width,
+                1,
+            ),
+        );
     }
     draw_menu(frame, app);
     if let Some(dialog) = &app.dialog {
@@ -333,23 +412,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 title,
                 value,
                 cursor,
-                ..
+                purpose,
             } => (
                 title.clone(),
                 Text::from(format!(
-                    "\n {}▏{}\n\n Enter: confirm   Esc: cancel   Ctrl+U: clear",
+                    "{}\n {}▏{}\n\n Enter: confirm   Esc: cancel   Ctrl+U: clear",
+                    match purpose {
+                        crate::app::Purpose::Copy(sources) | crate::app::Purpose::Move(sources) =>
+                            clip_line(
+                                &sources
+                                    .iter()
+                                    .map(|p| p.display())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                80
+                            ),
+                        _ => String::new(),
+                    },
                     &value[..*cursor],
                     &value[*cursor..]
                 )),
                 7,
             ),
-            Dialog::Delete { permanent } => (
+            Dialog::Delete { sources, permanent } => (
                 "Delete selected items".into(),
                 Text::from(vec![
-                    Line::from(format!(
-                        " {} item(s). Choose how to delete:",
-                        app.panel().sources().len()
-                    )),
+                    Line::from(format!(" {} item(s). Choose how to delete:", sources.len())),
                     Line::from(""),
                     Line::styled(
                         if *permanent {
@@ -359,7 +447,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         },
                         Style::default().fg(if *permanent { Color::LightRed } else { ACCENT }),
                     ),
-                    Line::from(""),
+                    Line::from(clip_line(
+                        &sources
+                            .iter()
+                            .map(|p| p.display())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        80,
+                    )),
                     Line::from(" Tab/←/→ or click: choose   Enter: confirm   Esc: cancel"),
                 ]),
                 9,
@@ -632,6 +727,25 @@ fn draw_menu(frame: &mut Frame, app: &mut App) {
                     1,
                 ),
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn search_geometry_keeps_selection_visible_at_all_supported_sizes() {
+        for (width, height) in [(36, 10), (80, 24), (120, 40)] {
+            for cursor in [0, 8, 14, 999] {
+                let view = search_viewport(Rect::new(0, 0, width, height), cursor);
+                assert!(
+                    cursor >= view.start && cursor < view.start + usize::from(view.results.height)
+                );
+                assert!(view.results.bottom() < view.popup.bottom());
+                assert_eq!(clip_line("e\u{301}👩‍💻long", 4), "e\u{301}👩‍💻…");
+                assert!(!clip_line("path\nnext", 80).contains('\n'));
+            }
         }
     }
 }

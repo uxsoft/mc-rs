@@ -102,6 +102,7 @@ jobs:
         env:
           MC_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/mc
         run: |
+          python3 -B -m unittest discover -s tests -p test_terminal_harness.py
           python3 tests/terminal_smoke.py
           python3 tests/archive_smoke.py
           python3 tests/viewer_smoke.py

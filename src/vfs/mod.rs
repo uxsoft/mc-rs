@@ -186,6 +186,10 @@ pub trait FileSystem: Send + Sync {
     fn set_metadata(&self, _path: &Path, _metadata: &Metadata, _ctx: &Context) -> Result<()> {
         Ok(())
     }
+    /// Filesystem parents may cross symlinks; only virtual providers may collapse them.
+    fn normalize_path(&self, path: &Path) -> PathBuf {
+        path.components().collect()
+    }
     fn canonical(&self, path: &Path) -> Result<PathBuf> {
         Ok(path.to_owned())
     }
@@ -220,10 +224,8 @@ pub struct VfsPath {
 }
 impl VfsPath {
     pub fn new(fs: Arc<dyn FileSystem>, path: PathBuf) -> Self {
-        Self {
-            fs,
-            path: normalize(&path),
-        }
+        let path = fs.normalize_path(&path);
+        Self { fs, path }
     }
     pub fn join(&self, path: impl AsRef<Path>) -> Self {
         Self::new(self.fs.clone(), self.path.join(path))
@@ -232,8 +234,12 @@ impl VfsPath {
         if self.path.as_os_str().is_empty() {
             self.fs.mount_parent()
         } else {
-            self.path
-                .parent()
+            let path = if self.path.components().next_back() == Some(Component::ParentDir) {
+                self.fs.canonical(&self.path).ok()?
+            } else {
+                self.path.clone()
+            };
+            path.parent()
                 .map(|p| Self::new(self.fs.clone(), p.to_owned()))
         }
     }
@@ -316,7 +322,7 @@ impl PartialOrd for VfsPath {
         Some(self.cmp(b))
     }
 }
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {

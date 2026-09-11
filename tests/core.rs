@@ -845,3 +845,120 @@ fn archive_locks_overlap_through_symlinked_parent_paths() {
     );
     assert!(!jobs::overlaps(&copy, &unrelated));
 }
+
+#[test]
+fn sevenz_selected_member_ignores_corrupt_later_block() {
+    use sevenz_rust2::{Archive, ArchiveEntry, ArchiveWriter, Password};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("independent.7z");
+    let mut writer = ArchiveWriter::new(fs::File::create(&path).unwrap()).unwrap();
+    writer
+        .push_archive_entry(ArchiveEntry::new_file("first"), Some(&b"intact"[..]))
+        .unwrap();
+    writer
+        .push_archive_entry(
+            ArchiveEntry::new_file("second"),
+            Some(&b"later damaged contents"[..]),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let archive = Archive::read(&mut fs::File::open(&path).unwrap(), &Password::empty()).unwrap();
+    assert_ne!(
+        archive.stream_map.file_block_index[0],
+        archive.stream_map.file_block_index[1]
+    );
+    let offset = 32 + archive.pack_pos() + archive.pack_sizes()[0];
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[offset as usize] ^= 0xff;
+    fs::write(&path, bytes).unwrap();
+    let mount = archives::open(path.into(), &Context::default(), |_| {}).unwrap();
+    assert_eq!(read_virtual(mount.join("first")), b"intact");
+    let mut damaged = mount
+        .join("second")
+        .fs
+        .open_read(std::path::Path::new("second"), &Context::default())
+        .unwrap();
+    assert!(std::io::Read::read_to_end(&mut damaged, &mut vec![]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_parents_preserve_symlinks_and_lock_aliases() {
+    use mc::vfs::{FileSystem, local::Local};
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("actual/sub")).unwrap();
+    fs::create_dir(dir.path().join("view")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("actual/sub"), dir.path().join("view/link"))
+        .unwrap();
+    fs::write(dir.path().join("actual/file"), "correct").unwrap();
+    let alias: VfsPath = dir.path().join("view/link/../file").into();
+    assert_eq!(read_virtual(alias.clone()), b"correct");
+    assert_eq!(alias.parent().unwrap().parent().unwrap().path, dir.path());
+    let direct: VfsPath = dir.path().join("actual/file").into();
+    assert!(mc::jobs::overlaps(
+        &mc::jobs::resources(Operation::Delete, &[alias], &direct),
+        &mc::jobs::resources(Operation::Delete, std::slice::from_ref(&direct), &direct)
+    ));
+    let missing = dir.path().join("view/link/../new/leaf");
+    assert_eq!(
+        Local.canonical(&missing).unwrap(),
+        dir.path().join("actual/new/leaf")
+    );
+    let relative: VfsPath = std::path::PathBuf::from("../../missing").into();
+    assert_eq!(relative.path, std::path::PathBuf::from("../../missing"));
+    assert!(
+        Local
+            .canonical(std::path::Path::new("missing-leaf"))
+            .unwrap()
+            .is_absolute()
+    );
+}
+
+#[test]
+fn partially_skipped_directory_move_keeps_original_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    let destination = dir.path().join("destination");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(destination.join("source")).unwrap();
+    fs::write(source.join("skip"), "source").unwrap();
+    fs::write(source.join("copy"), "copy").unwrap();
+    fs::write(destination.join("source/skip"), "keep").unwrap();
+    let job = start_local(
+        Operation::Move,
+        vec![source.clone()],
+        destination.clone(),
+        None,
+    );
+    assert_eq!(wait(&job, Decision::Skip), None);
+    assert_eq!(
+        fs::read_to_string(destination.join("source/skip")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("source/copy")).unwrap(),
+        "copy"
+    );
+    assert!(source.join("skip").exists() && source.join("copy").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_filesystem_forms_retain_parent_components() {
+    for value in [
+        r"C:\folder\link\..\leaf",
+        r"..\..\leaf",
+        r"\\server\share\link\..\leaf",
+        r"\\?\C:\link\..\leaf",
+    ] {
+        let path = std::path::PathBuf::from(value);
+        let virtual_path: VfsPath = path.clone().into();
+        assert_eq!(virtual_path.path, path);
+        assert!(
+            virtual_path
+                .path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        );
+    }
+}

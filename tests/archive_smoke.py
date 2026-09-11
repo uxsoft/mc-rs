@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """Unix PTY check: lazy encrypted archive navigation, masked retry, viewer, copy and exit."""
-import fcntl
 import os
+from terminal_harness import Terminal
 import pathlib
-import pty
-import select
 import shutil
-import signal
-import struct
 import tempfile
-import termios
-import time
 
 project = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', project / 'target/debug/mc')).resolve()
@@ -19,27 +13,9 @@ with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
     left, right = root / 'left', root / 'right'
     left.mkdir(); right.mkdir()
     shutil.copy(project / 'tests/fixtures/locked.zip', left / 'locked.zip')
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.environ['TERM'] = 'xterm-256color'
-        os.execv(str(binary), ['mc', str(left), str(right)])
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
-    output = bytearray()
-    def pump(seconds=.2):
-        until = time.monotonic() + seconds
-        while time.monotonic() < until:
-            if select.select([fd], [], [], .02)[0]:
-                try: data = os.read(fd, 65536)
-                except OSError: return
-                output.extend(data)
-                if b'\x1b[6n' in data: os.write(fd, b'\x1b[1;1R')
-    def send(data):
-        os.write(fd, data); pump()
-    def wait_for(predicate):
-        until = time.monotonic() + 8
-        while not predicate():
-            assert time.monotonic() < until, output[-4000:]
-            pump(.05)
+    session = Terminal([binary, left, right], rows=30, columns=110, env={})
+    output = session.output
+    pump, send, wait_for = session.pump, session.send, session.wait_for
     try:
         pump(.6)
         send(b'\x1b[B'); send(b'\r')  # Enter archive; plaintext headers need no password.
@@ -76,12 +52,7 @@ with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
         output.clear(); send(b'\x1bOR'); wait_for(lambda: b'Unlock archive' in output)
         send(b'\x1b'); pump(.3); send(b'\x1b')
         send(b'\x1b[21~'); pump(.3)
-        result = os.waitpid(pid, os.WNOHANG)
-        assert result[0] == pid and os.waitstatus_to_exitcode(result[1]) == 0, output[-4000:]
+        session.wait_exit()
         print('Archive PTY passed: metadata size, masked password retry/cancel, built-in viewer, cached password, copy, read-only guard, parent exit')
     finally:
-        try: os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError: pass
-        try: os.waitpid(pid, 0)
-        except ChildProcessError: pass
-        os.close(fd)
+        session.close()

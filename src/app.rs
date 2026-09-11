@@ -22,6 +22,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub enum Status {
+    Info(String),
+    Cancelled(String),
+    Failure(String),
+}
+impl From<String> for Status {
+    fn from(text: String) -> Self {
+        Self::Info(text)
+    }
+}
+impl From<&str> for Status {
+    fn from(text: &str) -> Self {
+        Self::Info(text.into())
+    }
+}
 pub enum Dialog {
     Input {
         title: String,
@@ -30,6 +45,7 @@ pub enum Dialog {
         purpose: Purpose,
     },
     Delete {
+        sources: Vec<VfsPath>,
         permanent: bool,
     },
     Message {
@@ -42,8 +58,8 @@ pub enum Dialog {
 #[derive(Clone)]
 pub enum Purpose {
     Rename(VfsPath),
-    Copy,
-    Move,
+    Copy(Vec<VfsPath>),
+    Move(Vec<VfsPath>),
     Mkdir,
     Search,
     Goto,
@@ -97,7 +113,7 @@ pub struct App {
     pub job_cursor: usize,
     pub search: Option<Search>,
     pub archive: Option<ArchiveTask>,
-    pub status: String,
+    pub status: Status,
     pub areas: [ratatui::layout::Rect; 2],
     pub dialog_area: ratatui::layout::Rect,
     pub height: u16,
@@ -231,8 +247,12 @@ impl App {
             if !task.cancel.load(Ordering::Relaxed) {
                 match result {
                     Ok(path) => match task.purpose {
-                        Purpose::Copy => self.start(Operation::Copy, path),
-                        Purpose::Move => self.start(Operation::Move, path),
+                        Purpose::Copy(sources) => {
+                            self.start_sources(Operation::Copy, sources, path)
+                        }
+                        Purpose::Move(sources) => {
+                            self.start_sources(Operation::Move, sources, path)
+                        }
                         _ => self.panels[task.panel].navigate(path),
                     },
                     Err(e) => self.message("Connection / directory", e.to_string()),
@@ -274,31 +294,43 @@ impl App {
         if !self.quick.is_empty() && self.panel().entries.len() != entry_count {
             self.quick_match(false);
         }
-        let mut rename_error = None;
+
         for job in &mut self.jobs {
             let progress = job.progress.lock().unwrap();
             if progress.done {
-                if job.operation == Operation::Rename && !job.resources.is_empty() {
-                    if let Some(error) = &progress.error {
-                        rename_error = Some(error.clone());
-                    } else if let Some(source) = job.sources.first() {
-                        for panel in &mut self.panels {
-                            if panel.current().is_some_and(|e| e.path == *source) {
-                                panel.reveal = Some(job.destination.clone());
-                            }
-                            if panel.selected.remove(source) {
-                                panel.selected.insert(job.destination.clone());
-                            }
+                if !job.resources.is_empty() {
+                    self.status = if progress.cancelled {
+                        Status::Cancelled(format!(
+                            "{}: {} completed · {}",
+                            job.title,
+                            progress.completed_sources,
+                            progress.error.as_deref().unwrap_or("Cancelled")
+                        ))
+                    } else if let Some(error) = &progress.error {
+                        Status::Failure(format!("{}: {error}", job.title))
+                    } else {
+                        Status::Info(format!(
+                            "{} finished · {} item(s) processed",
+                            job.title, progress.completed_sources
+                        ))
+                    };
+                }
+                if job.operation == Operation::Rename
+                    && !job.resources.is_empty()
+                    && progress.error.is_none()
+                    && let Some(source) = job.sources.first()
+                {
+                    for panel in &mut self.panels {
+                        if panel.current().is_some_and(|e| e.path == *source) {
+                            panel.reveal = Some(job.destination.clone());
+                        }
+                        if panel.selected.remove(source) {
+                            panel.selected.insert(job.destination.clone());
                         }
                     }
                 }
                 job.resources.clear();
             }
-        }
-        if let Some(error) = rename_error
-            && self.dialog.is_none()
-        {
-            self.message("Rename", error);
         }
         let done = self
             .jobs
@@ -310,7 +342,6 @@ impl App {
             for p in &mut self.panels {
                 p.refresh();
             }
-            self.status = "Job finished · F9 → Background jobs for results".into();
         }
         if let Some(result) = self
             .archive
@@ -343,21 +374,38 @@ impl App {
         self.start_sources(op, self.panel().sources(), destination);
     }
     fn start_sources(&mut self, op: Operation, sources: Vec<VfsPath>, destination: VfsPath) {
-        if !self.panel().path.fs.capabilities().write && op != Operation::Copy {
+        self.enqueue(op, sources, destination, false);
+    }
+    fn enqueue(
+        &mut self,
+        op: Operation,
+        sources: Vec<VfsPath>,
+        destination: VfsPath,
+        reconnect: bool,
+    ) {
+        if op != Operation::Copy
+            && op != Operation::Mkdir
+            && sources.iter().any(|source| !source.fs.capabilities().write)
+        {
             self.message(
                 "Read-only archive",
                 "Archive entries can be viewed and copied out. Modification is unavailable.",
             );
             return;
         }
-        if !destination.fs.capabilities().write && matches!(op, Operation::Copy | Operation::Move) {
+        if !destination.fs.capabilities().write
+            && matches!(
+                op,
+                Operation::Copy | Operation::Move | Operation::Rename | Operation::Mkdir
+            )
+        {
             self.message(
                 "Read-only destination",
                 "Leave the archive in the destination panel first.",
             );
             return;
         }
-        if op == Operation::Trash && !self.panel().path.fs.capabilities().trash {
+        if op == Operation::Trash && sources.iter().any(|source| !source.fs.capabilities().trash) {
             self.message("Trash unavailable", "This filesystem has no trash. Use F8 and explicitly choose Permanently delete to remove remote files.");
             return;
         }
@@ -371,7 +419,7 @@ impl App {
             self.message("Paths in use", "A running job uses these paths. Wait or cancel it in Background jobs; unrelated jobs can run together.");
             return;
         }
-        self.jobs.push(jobs::start(
+        self.jobs.push(jobs::start_inner(
             op,
             sources,
             destination,
@@ -379,7 +427,9 @@ impl App {
                 auth: Some(self.auth_tx.clone()),
                 ..Default::default()
             },
+            reconnect,
         ));
+        self.job_cursor = self.jobs.len() - 1;
         self.status = "Working in background · F9 → Background jobs".into();
     }
     fn open(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
@@ -497,9 +547,9 @@ impl App {
                 }
             }
             3 => self.builtin_view(), 4 => self.view(true, terminal)?,
-            5 | 6 => { if !self.panel().sources().is_empty() { self.input(if n == 5 { Purpose::Copy } else { Purpose::Move }, if n == 5 { "Copy to" } else { "Move to" }, self.panels[1-self.active].path.display().to_string()); } }
+            5 | 6 => { if !self.panel().sources().is_empty() { self.input(if n == 5 { Purpose::Copy(self.panel().sources()) } else { Purpose::Move(self.panel().sources()) }, if n == 5 { "Copy to" } else { "Move to" }, self.panels[1-self.active].path.display().to_string()); } }
             7 => self.input(Purpose::Mkdir, "Create directory", String::new()),
-            8 => { if !self.panel().sources().is_empty() { self.dialog = Some(Dialog::Delete { permanent: false }); } }
+            8 => { if !self.panel().sources().is_empty() { self.dialog = Some(Dialog::Delete { sources: self.panel().sources(), permanent: false }); } }
             9 => { self.clear_quick(); self.menu = Some(menu::State::default()); },
             10 => { if self.busy() { self.dialog = Some(Dialog::Quit); } else { self.quit = true; } }, _ => {}
         }
@@ -882,15 +932,16 @@ impl App {
                 }
                 edit_input(value, cursor, k);
             }
-            Dialog::Delete { permanent } => match k.code {
+            Dialog::Delete { sources, permanent } => match k.code {
                 K::Tab | K::Left | K::Right => *permanent = !*permanent,
                 K::Enter => {
-                    self.start(
+                    self.start_sources(
                         if *permanent {
                             Operation::Delete
                         } else {
                             Operation::Trash
                         },
+                        sources.clone(),
                         self.panel().path.clone(),
                     );
                     return Ok(());
@@ -926,21 +977,11 @@ impl App {
                                 .skip(j.progress.lock().unwrap().completed_sources)
                                 .cloned()
                                 .collect::<Vec<_>>();
-                            let resources =
-                                jobs::resources(j.operation, &remaining, &j.destination);
-                            if !self.jobs.iter().any(|j| {
-                                !j.progress.lock().unwrap().done
-                                    && jobs::overlaps(&resources, &j.resources)
-                            }) {
-                                let next = jobs::retry(
-                                    j,
-                                    Context {
-                                        auth: Some(self.auth_tx.clone()),
-                                        ..Default::default()
-                                    },
-                                );
-                                self.jobs.push(next);
-                                self.job_cursor = self.jobs.len() - 1;
+                            let operation = j.operation;
+                            let destination = j.destination.clone();
+                            self.enqueue(operation, remaining, destination, true);
+                            if self.dialog.is_some() {
+                                return Ok(());
                             }
                         }
                     }
@@ -988,7 +1029,7 @@ impl App {
             return;
         }
 
-        if matches!(purpose, Purpose::Goto | Purpose::Copy | Purpose::Move)
+        if matches!(purpose, Purpose::Goto | Purpose::Copy(_) | Purpose::Move(_))
             && remote::is_url(&value)
         {
             // Reuse an existing authenticated mount when the edited label is inside it.
@@ -1008,7 +1049,7 @@ impl App {
             self.resolve_path(value, existing, purpose);
             return;
         }
-        let path = if matches!(purpose, Purpose::Copy | Purpose::Move)
+        let path = if matches!(purpose, Purpose::Copy(_) | Purpose::Move(_))
             && value == self.panels[1 - self.active].path.display()
         {
             self.panels[1 - self.active].path.clone()
@@ -1035,8 +1076,8 @@ impl App {
         };
         match purpose {
             Purpose::Rename(_) => unreachable!(),
-            Purpose::Copy => self.start(Operation::Copy, path),
-            Purpose::Move => self.start(Operation::Move, path),
+            Purpose::Copy(sources) => self.start_sources(Operation::Copy, sources, path),
+            Purpose::Move(sources) => self.start_sources(Operation::Move, sources, path),
             Purpose::Mkdir => {
                 if !value.is_empty() {
                     self.start(Operation::Mkdir, path);
@@ -1176,6 +1217,27 @@ impl App {
                 search.cursor =
                     (search.cursor + 1).min(search.results.lock().unwrap().len().saturating_sub(1))
             }
+            K::Home => search.cursor = 0,
+            K::End => search.cursor = search.results.lock().unwrap().len().saturating_sub(1),
+            K::PageUp | K::PageDown => {
+                let rows = usize::from(
+                    ui::search_viewport(
+                        ratatui::layout::Rect::new(0, 0, self.width, self.height),
+                        search.cursor,
+                    )
+                    .results
+                    .height,
+                )
+                .max(1);
+                search.cursor = if k.code == K::PageUp {
+                    search.cursor.saturating_sub(rows)
+                } else {
+                    search
+                        .cursor
+                        .saturating_add(rows)
+                        .min(search.results.lock().unwrap().len().saturating_sub(1))
+                };
+            }
             K::Char('c') if k.modifiers == M::CONTROL => {
                 search.cancel.store(true, Ordering::Relaxed)
             }
@@ -1188,7 +1250,7 @@ impl App {
                 {
                     self.panel_mut().navigate(parent.to_owned());
                     self.panel_mut().reveal = Some(path.clone());
-                    self.status = format!("Found: {}", path.display());
+                    self.status = format!("Found: {}", path.display()).into();
                 }
             }
             _ => {}
@@ -1318,7 +1380,7 @@ impl App {
                         .min(self.jobs.len().saturating_sub(1));
                 }
                 match self.dialog.as_mut().unwrap() {
-                    Dialog::Delete { permanent } if m.row == area.y + 3 => {
+                    Dialog::Delete { permanent, .. } if m.row == area.y + 3 => {
                         *permanent = relative_x >= 22
                     }
                     _ => {}
@@ -1333,14 +1395,20 @@ impl App {
             return Ok(());
         }
         if let Some(search) = &mut self.search {
+            let view = ui::search_viewport(
+                ratatui::layout::Rect::new(0, 0, self.width, self.height),
+                search.cursor,
+            );
             match m.kind {
                 MouseEventKind::ScrollUp => search.cursor = search.cursor.saturating_sub(3),
                 MouseEventKind::ScrollDown => {
                     search.cursor = (search.cursor + 3)
                         .min(search.results.lock().unwrap().len().saturating_sub(1))
                 }
-                MouseEventKind::Down(MouseButton::Left) if inside && m.row >= area.y + 2 => {
-                    let row = search.cursor.saturating_sub(8) + (m.row - area.y - 2) as usize;
+                MouseEventKind::Down(MouseButton::Left)
+                    if view.results.contains((m.column, m.row).into()) =>
+                {
+                    let row = view.start + (m.row - view.results.y) as usize;
                     if row < search.results.lock().unwrap().len() {
                         search.cursor = row;
                         let double = self.last_click.is_some_and(|(t, p, r)| {
@@ -1541,6 +1609,188 @@ mod quick_navigation_tests {
     }
     fn name(app: &App) -> &str {
         &app.panel().current().unwrap().name
+    }
+
+    #[test]
+    fn delayed_destination_keeps_captured_sources() {
+        let (dir, mut app) = fixture();
+        let mut terminal = terminal();
+        type_text(&mut app, &mut terminal, "Alpha");
+        let original = app.panel().sources();
+        app.function(5, &mut terminal).unwrap();
+        let Some(Dialog::Input { purpose, .. }) = app.dialog.take() else {
+            panic!("Missing copy dialog")
+        };
+        let (tx, receiver) = mpsc::channel();
+        app.connecting = Some(PathTask {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+            panel: app.active,
+            purpose,
+        });
+        app.panel_mut().cursor = 0;
+        tx.send(Ok(dir.path().join("delayed-copy").into())).unwrap();
+        app.poll();
+        assert_eq!(app.jobs[0].sources, original);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.jobs[0].progress.lock().unwrap().done {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("delayed-copy")).unwrap(),
+            "Alpha.txt"
+        );
+    }
+
+    #[test]
+    fn long_search_results_draw_and_click_one_row_each_after_resize() {
+        let (_dir, mut app) = fixture();
+        app.search = Some(Search {
+            results: Arc::new(Mutex::new(
+                (0..30)
+                    .map(|i| app.panel().path.join(format!("{i}-{}", "long".repeat(40))))
+                    .collect(),
+            )),
+            done: Arc::new(AtomicBool::new(true)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            errors: Arc::new(Mutex::new(0)),
+            cursor: 20,
+        });
+        for (width, height) in [(80, 24), (36, 10)] {
+            let mut screen =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            screen.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+            let view = ui::search_viewport(
+                ratatui::layout::Rect::new(0, 0, width, height),
+                app.search.as_ref().unwrap().cursor,
+            );
+            let selected_row =
+                view.results.y + (app.search.as_ref().unwrap().cursor - view.start) as u16;
+            assert_eq!(
+                screen.backend().buffer()[(view.results.x, selected_row)].symbol(),
+                "›"
+            );
+            app.mouse(
+                event::MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: view.results.x,
+                    row: view.results.y,
+                    modifiers: M::NONE,
+                },
+                &mut terminal(),
+            )
+            .unwrap();
+            assert_eq!(app.search.as_ref().unwrap().cursor, view.start);
+        }
+    }
+
+    #[test]
+    fn new_jobs_and_retries_share_overlap_rejection_and_status_is_drawn() {
+        let (_dir, mut app) = fixture();
+        let source = app.panel().path.join("Alpha.txt");
+        let destination = app.panel().path.join("target");
+        let job = |done, error| Job {
+            operation: Operation::Copy,
+            sources: vec![source.clone()],
+            destination: destination.clone(),
+            started: Instant::now(),
+            resources: jobs::resources(
+                Operation::Copy,
+                std::slice::from_ref(&source),
+                &destination,
+            ),
+            title: "Copy".into(),
+            progress: Arc::new(Mutex::new(jobs::Progress {
+                done,
+                error,
+                ..Default::default()
+            })),
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        app.jobs.push(job(false, None));
+        app.start_sources(Operation::Copy, vec![source.clone()], destination.clone());
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Message { title, .. }) if title == "Paths in use")
+        );
+        app.jobs.push(job(true, Some("Disconnected".into())));
+        app.job_cursor = 1;
+        app.dialog = Some(Dialog::Jobs);
+        app.key(KeyEvent::from(K::Char('r')), &mut terminal())
+            .unwrap();
+        assert_eq!(app.jobs.len(), 2);
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Message { title, .. }) if title == "Paths in use")
+        );
+        app.dialog = None;
+        app.status = Status::Failure("Readable failure".into());
+        let mut screen =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        screen.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let text = screen
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("Failed: Readable failure"));
+        app.jobs[0].progress.lock().unwrap().done = true;
+    }
+
+    #[test]
+    fn operation_dialogs_keep_original_sources_after_refresh() {
+        for key in [5, 6, 8] {
+            let (dir, mut app) = fixture();
+            let mut terminal = terminal();
+            type_text(&mut app, &mut terminal, "Alpha");
+            let original = app.panel().sources();
+            app.function(key, &mut terminal).unwrap();
+            std::fs::remove_file(&original[0].path).unwrap();
+            app.jobs.push(jobs::start(
+                Operation::Mkdir,
+                vec![],
+                dir.path().join("background").into(),
+                Context::default(),
+            ));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app.jobs[0].progress.lock().unwrap().done {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            app.poll(); // Completion refreshes both panels while the dialog remains open.
+            while app.panel().loading {
+                app.poll();
+                std::thread::yield_now();
+            }
+            match app.dialog.as_mut().unwrap() {
+                Dialog::Delete { sources, permanent } => {
+                    assert_eq!(*sources, original);
+                    *permanent = true;
+                }
+                Dialog::Input { purpose, value, .. } => {
+                    match purpose {
+                        Purpose::Copy(sources) | Purpose::Move(sources) => {
+                            assert_eq!(*sources, original)
+                        }
+                        _ => panic!("Wrong purpose"),
+                    }
+                    *value = dir.path().join("destination").display().to_string();
+                }
+                _ => panic!("Wrong dialog"),
+            }
+            app.key(KeyEvent::from(K::Enter), &mut terminal).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app.jobs.last().unwrap().progress.lock().unwrap().done {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            app.poll();
+            assert_eq!(app.jobs.last().unwrap().sources, original);
+            assert!(matches!(app.status, Status::Failure(_)));
+            assert!(dir.path().join("Alpine.txt").exists());
+            assert!(!dir.path().join("destination").exists());
+        }
     }
 
     #[test]

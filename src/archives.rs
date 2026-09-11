@@ -1,6 +1,6 @@
 //! Read-only archive VFS sessions: immutable header index, on-demand content streams.
 use crate::vfs::{self, *};
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use compress_tools::{ArchiveContents, ArchiveIteratorBuilder, ArchivePassword};
 use std::{
     collections::BTreeMap,
@@ -497,12 +497,26 @@ fn decode(
             )?;
         }
         Driver::SevenZip => {
-            let mut reader = sevenz_rust2::ArchiveReader::new(
-                seek_source(source, ctx)?,
-                sevenz_rust2::Password::from(password.unwrap_or("")),
-            )?;
+            let mut source = seek_source(source, ctx)?;
+            let password = sevenz_rust2::Password::from(password.unwrap_or(""));
+            let archive = sevenz_rust2::Archive::read(&mut source, &password)?;
+            let index = archive
+                .files
+                .iter()
+                .position(|entry| entry.name == member)
+                .context("Archive member disappeared")?;
+            ctx.check()?;
+            let Some(block) = archive.stream_map.file_block_index[index] else {
+                ensure!(
+                    archive.files[index].size == 0,
+                    "Missing archive member stream"
+                );
+                return Ok(());
+            };
+            let reader =
+                sevenz_rust2::BlockDecoder::new(1, block, &archive, &password, &mut source);
             let mut found = false;
-            reader.for_each_entries(|entry, reader| {
+            reader.for_each_entries(&mut |entry, reader| {
                 ctx.check().map_err(|e| io::Error::other(e.to_string()))?;
                 if entry.name == member {
                     io::copy(reader, &mut sink)?;
@@ -576,6 +590,10 @@ fn decode(
     Ok(())
 }
 impl FileSystem for Archive {
+    fn normalize_path(&self, path: &Path) -> PathBuf {
+        vfs::normalize(path)
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             seek: true,

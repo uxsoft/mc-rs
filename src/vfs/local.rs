@@ -172,9 +172,18 @@ impl FileSystem for Local {
         Ok(())
     }
     fn canonical(&self, p: &Path) -> Result<PathBuf> {
-        let mut ancestor = p;
+        let absolute = if p.is_absolute() {
+            p.to_owned()
+        } else {
+            std::env::current_dir()?.join(p)
+        };
+        let mut ancestor = absolute.as_path();
         let mut suffix = vec![];
         while !ancestor.exists() {
+            anyhow::ensure!(
+                ancestor.components().next_back() != Some(std::path::Component::ParentDir),
+                "Cannot resolve a parent through a missing directory"
+            );
             if let Some(name) = ancestor.file_name() {
                 suffix.push(name.to_owned());
             }
@@ -189,6 +198,21 @@ impl FileSystem for Local {
             path.push(s);
         }
         Ok(path)
+    }
+    fn lock_path(&self, path: &Path) -> PathBuf {
+        self.canonical(path).unwrap_or_else(|_| {
+            // An unresolved alias must conflict conservatively, never bypass job locks.
+            let absolute = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(path)
+            };
+            absolute
+                .ancestors()
+                .last()
+                .unwrap_or(std::path::Path::new("/"))
+                .to_owned()
+        })
     }
     fn same_file(&self, a: &Path, b: &Path) -> bool {
         #[cfg(unix)]

@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """Unix PTY integration smoke test. Run after cargo build; uses disposable files only."""
-import fcntl
 import os
+from terminal_harness import Terminal
 import pathlib
-import pty
-import select
-import signal
-import struct
 import tempfile
-import termios
-import time
 
 binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', pathlib.Path(__file__).resolve().parents[1] / 'target/debug/mc')).resolve()
 with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
@@ -17,29 +11,9 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
     left, right = root / 'left', root / 'right'
     left.mkdir(); right.mkdir()
     (left / 'alpha.txt').write_text('cat smoke content\n')
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.environ['TERM'] = 'xterm-256color'
-        os.environ['XDG_DATA_HOME'] = str(root / 'data')
-        os.environ['VISUAL'] = str(root / 'missing-editor')
-        os.execv(str(binary), [str(binary), str(left), str(right)])
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
-    output = bytearray()
-    def pump(seconds=.25):
-        until = time.monotonic() + seconds
-        while time.monotonic() < until:
-            if select.select([fd], [], [], .02)[0]:
-                try: data = os.read(fd, 65536)
-                except OSError: return
-                output.extend(data)
-                if b'\x1b[6n' in data: os.write(fd, b'\x1b[1;1R')
-    def send(data):
-        os.write(fd, data); pump()
-    def wait_for(predicate):
-        until=time.monotonic()+5
-        while not predicate():
-            assert time.monotonic()<until, output[-3000:]
-            pump(.05)
+    session = Terminal([binary, left, right], rows=30, columns=110, env={"XDG_DATA_HOME": root / "data", "VISUAL": root / "missing-editor"})
+    output = session.output
+    pump, send, wait_for = session.pump, session.send, session.wait_for
     try:
         pump(.7)
         assert b'alpha.txt' in output
@@ -128,14 +102,11 @@ with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
         assert (moved_batch/'batch-a/file').read_text() == 'abc'
         assert (moved_batch/'batch-b/file').read_text() == '12345'
         # Resize still leaves quit usable.
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 10, 36, 0, 0)); os.kill(pid,signal.SIGWINCH); pump()
+        session.resize(10, 36); pump()
         send(b'\x1b[21~')
-        done, status = os.waitpid(pid, 0)
-        assert os.waitstatus_to_exitcode(status)==0
+        session.wait_exit()
         assert b'\x1b[?1049l' in output and b'\x1b[?1000l' in output
         pathlib.Path('/tmp/mc-terminal-smoke.log').write_bytes(output)
         print('PTY smoke passed: built-in viewer, Enter cat, copy, move, mkdir, trash, permanent delete, search, mouse, Space multi-selection, directory sizes, batch copy/move, resize, clean exit')
     finally:
-        try: os.kill(pid,signal.SIGKILL)
-        except ProcessLookupError: pass
-        os.close(fd)
+        session.close()

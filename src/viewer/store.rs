@@ -1,4 +1,5 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 // Private, disk-backed styled rows. Neither the row index nor long lines live in RAM.
 use anyhow::Result;
 use ratatui::{
@@ -48,6 +49,11 @@ pub(super) struct Store {
     position: u64,
     row_start: u64,
     column: u64,
+    pending: String,
+    pending_ink: Ink,
+    pending_wrap: Option<u16>,
+    buffer: String,
+    buffer_ink: Ink,
     pub rows: u64,
     pub max_width: u64,
 }
@@ -61,6 +67,11 @@ impl Store {
             position: 0,
             row_start: 0,
             column: 0,
+            pending: String::new(),
+            pending_ink: Ink::default(),
+            pending_wrap: None,
+            buffer: String::new(),
+            buffer_ink: Ink::default(),
             rows: 0,
             max_width: 0,
         })
@@ -69,7 +80,7 @@ impl Store {
         if value.is_empty() {
             return Ok(());
         }
-        let width = Span::raw(value).width() as u64;
+        let width = value.graphemes(true).map(|g| g.width() as u64).sum::<u64>();
         if self.data_seek {
             self.data.seek(SeekFrom::Start(self.position))?;
             self.data_seek = false;
@@ -80,10 +91,40 @@ impl Store {
         self.data.write_all(&[ink.flags])?;
         self.data.write_all(value.as_bytes())?;
         self.position += 16 + value.len() as u64;
+        Ok(())
+    }
+    fn flush_buffer(&mut self) -> Result<()> {
+        let value = std::mem::take(&mut self.buffer);
+        self.run(&value, self.buffer_ink)
+    }
+    fn flush_cluster(&mut self) -> Result<()> {
+        let mut cluster = std::mem::take(&mut self.pending);
+        if cluster.is_empty() {
+            return Ok(());
+        }
+        let width = cluster.width() as u64;
+        if self
+            .pending_wrap
+            .is_some_and(|limit| self.column > 0 && self.column + width > u64::from(limit.max(1)))
+        {
+            self.end_row()?;
+        }
+        if self.buffer_ink != self.pending_ink || self.buffer.len() + cluster.len() > 4096 {
+            self.flush_buffer()?;
+        }
+        self.buffer_ink = self.pending_ink;
+        self.buffer.push_str(&cluster);
         self.column += width;
+        cluster.clear();
+        self.pending = cluster;
         Ok(())
     }
     pub fn newline(&mut self) -> Result<()> {
+        self.flush_cluster()?;
+        self.end_row()
+    }
+    fn end_row(&mut self) -> Result<()> {
+        self.flush_buffer()?;
         if self.index_seek {
             self.index.seek(SeekFrom::Start(self.rows * 24))?;
             self.index_seek = false;
@@ -98,56 +139,50 @@ impl Store {
         Ok(())
     }
     pub fn column(&self) -> u64 {
-        self.column
+        self.column + self.pending.width() as u64
     }
     /// Strip terminal controls, expand tabs, and optionally reflow a Markdown row.
     pub fn write(&mut self, text: &str, ink: Ink, wrap: Option<u16>) -> Result<()> {
-        let mut chunk = String::with_capacity(4096);
-        let mut width = 0u64;
         for ch in text.chars() {
-            if ch == '\r' {
-                continue;
-            }
-            if ch == '\n' {
-                self.run(&chunk, ink)?;
-                chunk.clear();
-                width = 0;
-                self.newline()?;
-                continue;
-            }
-            let ch = if ch.is_control() && ch != '\t' {
-                '�'
-            } else {
-                ch
-            };
-            let count = if ch == '\t' {
-                (4 - (self.column + width) % 4) as usize
-            } else {
-                1
-            };
-            for _ in 0..count {
-                let ch = if ch == '\t' { ' ' } else { ch };
-                let w = ch.width().unwrap_or(0) as u64;
-                if wrap.is_some_and(|limit| self.column + width + w > u64::from(limit.max(1)))
-                    && self.column + width > 0
-                {
-                    self.run(&chunk, ink)?;
-                    chunk.clear();
-                    width = 0;
+            match ch {
+                '\r' => continue,
+                '\n' => {
                     self.newline()?;
+                    continue;
                 }
-                chunk.push(ch);
-                width += w;
-                if chunk.len() >= 4096 {
-                    self.run(&chunk, ink)?;
-                    chunk.clear();
-                    width = 0;
+                '\t' => {
+                    self.flush_cluster()?;
+                    let count = 4 - self.column % 4;
+                    for _ in 0..count {
+                        self.write(" ", ink, wrap)?;
+                    }
+                    continue;
                 }
+                _ => {}
+            }
+            let ch = if ch.is_control() { '�' } else { ch };
+            let old_len = self.pending.len();
+            self.pending.push(ch);
+            if (old_len == 1 && self.pending.is_ascii())
+                || self.pending.graphemes(true).nth(1).is_some()
+            {
+                self.pending.truncate(old_len);
+                self.flush_cluster()?;
+                self.pending.push(ch);
+                self.pending_ink = ink;
+                self.pending_wrap = wrap;
+            } else if old_len == 0 {
+                self.pending_ink = ink;
+                self.pending_wrap = wrap;
+            } else if self.pending.chars().count() > 17 {
+                // Bound pathological combining/ZWJ clusters even across styled spans.
+                self.pending.truncate(old_len);
             }
         }
-        self.run(&chunk, ink)
+        Ok(())
     }
     pub fn finish(&mut self) -> Result<()> {
+        self.flush_cluster()?;
         if self.column > 0 || self.rows == 0 {
             self.newline()?;
         }
@@ -171,7 +206,6 @@ impl Store {
         let mut column = 0;
         let right = left.saturating_add(u64::from(width));
         let mut spans = Vec::new();
-        let mut combining = 0;
         while pos < end && column < right {
             let mut header = [0; 16];
             self.data.seek(SeekFrom::Start(pos))?;
@@ -182,20 +216,10 @@ impl Store {
                 let mut bytes = vec![0; len];
                 self.data.get_mut().read_exact(&mut bytes)?;
                 let mut visible = String::new();
-                for ch in std::str::from_utf8(&bytes)?.chars() {
-                    let w = ch.width().unwrap_or(0) as u64;
-                    // A malicious run of zero-width combining characters must not turn
-                    // a one-cell viewport into an unbounded in-memory string.
-                    if w == 0 {
-                        combining += 1;
-                    } else {
-                        combining = 0;
-                    }
-                    if combining > 16 {
-                        continue;
-                    }
+                for cluster in std::str::from_utf8(&bytes)?.graphemes(true) {
+                    let w = cluster.width() as u64;
                     if column >= left && column + w <= right {
-                        visible.push(ch);
+                        visible.push_str(cluster);
                     } else if column < right && column + w > left {
                         visible.push_str(&" ".repeat(
                             (column + w).min(right).saturating_sub(column.max(left)) as usize,
@@ -228,6 +252,40 @@ impl Store {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    #[test]
+    fn clusters_survive_styles_chunks_wrapping_and_clipping() {
+        for padding in [0, 4095, 4096] {
+            let mut store = Store::new().unwrap();
+            store
+                .write(&"a".repeat(padding), Ink::default(), None)
+                .unwrap();
+            for part in ["e", "\u{301}", "👩", "\u{200d}", "💻", "x\n"] {
+                let ink = Ink {
+                    flags: 1,
+                    ..Ink::default()
+                };
+                store.write(part, ink, None).unwrap();
+            }
+            assert_eq!(store.max_width, padding as u64 + 4);
+            let line = |s: &mut Store, left, width| {
+                s.line(0, left, width)
+                    .unwrap()
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            };
+            assert_eq!(line(&mut store, padding as u64, 4), "e\u{301}👩‍💻x");
+            assert_eq!(line(&mut store, padding as u64, 1), "e\u{301}");
+            assert_eq!(line(&mut store, padding as u64 + 2, 2), " x");
+            assert_eq!(line(&mut store, padding as u64 + 1, 1), " ");
+        }
+        let mut store = Store::new().unwrap();
+        store.write("e\u{301}👩‍💻x", Ink::default(), Some(3)).unwrap();
+        store.finish().unwrap();
+        assert_eq!(store.rows, 2);
+        assert_eq!(store.max_width, 3);
+    }
     #[test]
     fn excessive_combining_marks_do_not_expand_the_visible_cache() {
         let mut store = Store::new().unwrap();
