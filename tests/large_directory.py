@@ -5,7 +5,7 @@ from terminal_harness import Terminal
 from pathlib import Path
 import tempfile
 import time
-binary=Path(os.environ.get("MC_TEST_BINARY",Path(__file__).resolve().parents[1]/"target/debug/mc")).resolve()
+binary=Path(os.environ.get("MC_TEST_BINARY",Path(__file__).resolve().parents[1]/"target/debug/mc-rs")).resolve()
 with tempfile.TemporaryDirectory(prefix="mc-large-") as tmp:
     root=Path(tmp)
     for i in range(20000):(root/f"entry-{i:05}").touch()

@@ -133,7 +133,7 @@ fn parse(
             }
             *active = yes && !no;
         } else if key == "match" {
-            bail!("SSH config Match blocks are unsupported; use Host blocks for mc connections");
+            bail!("SSH config Match blocks are unsupported; use Host blocks for mc-rs connections");
         } else if *active {
             if key == "include" {
                 for pattern in args {

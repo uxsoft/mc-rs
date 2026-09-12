@@ -11,21 +11,21 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "mc — dual-panel file manager\nUsage: mc [LEFT_DIRECTORY] [RIGHT_DIRECTORY]\nF1 help · F3 viewer · F4 editor · F5 copy · F6 move · F7 mkdir · F8 delete · F9 menu · F10 quit\nRemote URLs: ftp://, sftp://, ssh:// (SSH helper requires Python 3).\nArchives: ZIP, RAR, tar, 7z, gzip (read-only). Requires libarchive; cat must be on PATH for Enter/double-click."
+            "mc-rs — dual-panel file manager\nUsage: mc-rs [LEFT_DIRECTORY] [RIGHT_DIRECTORY]\nF1 help · F3 viewer · F4 editor · F5 copy · F6 move · F7 mkdir · F8 delete · F9 menu · F10 quit\nRemote URLs: ftp://, sftp://, ssh:// (SSH helper requires Python 3).\nArchives: ZIP, RAR, tar, 7z, gzip (read-only). Requires libarchive; cat must be on PATH for Enter/double-click."
         );
         return Ok(());
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mc {}", env!("CARGO_PKG_VERSION"));
+        println!("mc-rs {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     anyhow::ensure!(
         args.len() <= 2,
-        "Usage: mc [LEFT_DIRECTORY] [RIGHT_DIRECTORY]"
+        "Usage: mc-rs [LEFT_DIRECTORY] [RIGHT_DIRECTORY]"
     );
     anyhow::ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "mc requires an interactive terminal (try --help)"
+        "mc-rs requires an interactive terminal (try --help)"
     );
     let cwd = std::env::current_dir()?;
     let path = |i| -> Result<PathBuf> {

@@ -49,7 +49,7 @@ pub fn launch(path: &Path, edit: bool, terminal: &mut ratatui::DefaultTerminal) 
         };
         let status = command.arg(path).status()?;
         if !edit {
-            print!("\nPress Enter to return to mc…");
+            print!("\nPress Enter to return to mc-rs…");
             io::stdout().flush()?;
             let mut line = String::new();
             io::stdin().read_line(&mut line)?;
@@ -77,7 +77,7 @@ pub fn cat_stream(
         let copied = io::copy(&mut reader, &mut stdin);
         drop(stdin);
         let status = child.wait()?;
-        print!("\nPress Enter to return to mc…");
+        print!("\nPress Enter to return to mc-rs…");
         io::stdout().flush()?;
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;

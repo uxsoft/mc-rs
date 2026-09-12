@@ -10,7 +10,7 @@ import struct
 import zlib
 
 project = Path(__file__).resolve().parents[1]
-binary = Path(os.environ.get("MC_TEST_BINARY", project / "target/debug/mc")).resolve()
+binary = Path(os.environ.get("MC_TEST_BINARY", project / "target/debug/mc-rs")).resolve()
 kitty = os.environ.get("MC_TEST_GRAPHICS") == "kitty"
 test_image = Path(os.environ.get("MC_TEST_IMAGE", project / "tests/fixtures/viewer.png"))
 rgb = re.compile(rb"\x1b\[(?:38|48);2;\d+;\d+;\d+(?:;|m)")

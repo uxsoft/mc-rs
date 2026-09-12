@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from urllib.parse import urlparse, unquote
 
-binary=Path(os.environ.get("MC_TEST_BINARY",Path(__file__).resolve().parents[1]/"target/debug/mc")).resolve()
+binary=Path(os.environ.get("MC_TEST_BINARY",Path(__file__).resolve().parents[1]/"target/debug/mc-rs")).resolve()
 remote=Path(unquote(urlparse(os.environ["MC_TEST_SFTP"]).path))
 marker=remote/"slow-upload"
 marker.touch()

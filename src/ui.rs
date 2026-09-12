@@ -128,7 +128,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let bar_style = Style::default().fg(FG).bg(Color::Rgb(30, 38, 49));
     frame.render_widget(Block::default().style(bar_style), rows[0]);
     frame.render_widget(
-        Paragraph::new(" mc ").style(
+        Paragraph::new(" mc-rs ").style(
             Style::default()
                 .fg(ACCENT)
                 .bg(Color::Rgb(30, 38, 49))

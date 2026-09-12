@@ -5,7 +5,7 @@ from terminal_harness import Terminal
 from pathlib import Path
 import tempfile
 
-binary = Path(os.environ.get("MC_TEST_BINARY", Path(__file__).resolve().parents[1] / "target/debug/mc")).resolve()
+binary = Path(os.environ.get("MC_TEST_BINARY", Path(__file__).resolve().parents[1] / "target/debug/mc-rs")).resolve()
 for key in ["MC_TEST_FTP", "MC_TEST_SFTP", "MC_TEST_SSH"]:
     with tempfile.TemporaryDirectory(prefix="mc-remote-dest-") as destination:
         session = Terminal([binary, os.environ[key], destination], rows=30, columns=140, env={})

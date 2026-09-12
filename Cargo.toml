@@ -22,7 +22,7 @@ pkg-fmt = "zip"
 name = "mc"
 
 [[bin]]
-name = "mc"
+name = "mc-rs"
 path = "src/main.rs"
 
 # Image decoding and resampling otherwise take seconds per photograph in cargo run.

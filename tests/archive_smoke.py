@@ -7,7 +7,7 @@ import shutil
 import tempfile
 
 project = pathlib.Path(__file__).resolve().parents[1]
-binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', project / 'target/debug/mc')).resolve()
+binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', project / 'target/debug/mc-rs')).resolve()
 with tempfile.TemporaryDirectory(prefix='mc-archive-') as tmp:
     root = pathlib.Path(tmp)
     left, right = root / 'left', root / 'right'

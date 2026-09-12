@@ -5,7 +5,7 @@ from terminal_harness import Terminal
 import pathlib
 import tempfile
 
-binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', pathlib.Path(__file__).resolve().parents[1] / 'target/debug/mc')).resolve()
+binary = pathlib.Path(os.environ.get('MC_TEST_BINARY', pathlib.Path(__file__).resolve().parents[1] / 'target/debug/mc-rs')).resolve()
 with tempfile.TemporaryDirectory(prefix='mc-smoke-') as tmp:
     root = pathlib.Path(tmp)
     left, right = root / 'left', root / 'right'

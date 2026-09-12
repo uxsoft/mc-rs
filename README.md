@@ -1,6 +1,6 @@
-# mc
+# mc-rs
 
-A modern dual-panel terminal file manager written in Rust and Ratatui. The crates.io package is named `mc-rs`; the binary is named `mc`. It preserves the familiar Midnight Commander keys for supported operations, with a dark interface and mouse navigation.
+A modern dual-panel terminal file manager written in Rust and Ratatui. The crates.io package and installed binary are both named `mc-rs`. It preserves the familiar Midnight Commander keys for supported operations, with a dark interface and mouse navigation.
 
 ## Build and run
 
@@ -19,15 +19,23 @@ cargo run --release -- /path/to/left /path/to/right
 
 Both directories are optional and default to the current directory. `--help` and `--version` work without a terminal. Run inside a terminal with keyboard and mouse support.
 
-With mise, install the `mc-rs` package and launch its `mc` executable. After installing the build dependencies above:
+Install the package from crates.io with Cargo:
+
+```sh
+cargo install mc-rs
+mc-rs --version
+mc-rs
+```
+
+With mise, install the `mc-rs` package and launch its `mc-rs` executable. After installing the build dependencies above:
 
 ```sh
 env MISE_CARGO_BINSTALL=false mise use -g cargo:mc-rs@0.2.6
-mise exec cargo:mc-rs -- mc --version
-mise exec cargo:mc-rs -- mc
+mise exec cargo:mc-rs -- mc-rs --version
+mise exec cargo:mc-rs -- mc-rs
 ```
 
-This explicitly uses Cargo source installation. Without `MISE_CARGO_BINSTALL=false`, mise can install matching prebuilt GitHub release binaries using the package’s cargo-binstall metadata. For bare `mc` in Fish, put `mise activate fish | source` in `~/.config/fish/config.fish` and open a new terminal. Version 0.2.6 was verified through an isolated mise source install; the package and executable names differ intentionally.
+This explicitly uses Cargo source installation. Without `MISE_CARGO_BINSTALL=false`, mise can install matching prebuilt GitHub release binaries using the package’s cargo-binstall metadata. For bare `mc-rs` in Fish, put `mise activate fish | source` in `~/.config/fish/config.fish` and open a new terminal.
 
 Set your terminal font to a [Nerd Font](https://www.nerdfonts.com/) (use a Mono variant for consistent cell spacing) to display file type icons. Both panels show icons for directories, symlinks, archives, source code, documents, media, and other common file types, including inside archives. Unknown types use a generic file icon. Icons are always enabled; fonts without these glyphs may show empty boxes or unrelated characters.
 
@@ -38,7 +46,7 @@ Installing the font alone is insufficient: select its exact family in your termi
 family = "CaskaydiaMono Nerd Font Mono"
 ```
 
-Alacritty inherits this family for bold and italic text unless explicitly overridden. Other terminals need the equivalent font selection in their settings. Open a new terminal after changing it; no `mc` rebuild is needed.
+Alacritty inherits this family for bold and italic text unless explicitly overridden. Other terminals need the equivalent font selection in their settings. Open a new terminal after changing it; no `mc-rs` rebuild is needed.
 
 F3 opens the built-in read-only viewer. Enter/double-click on a regular file requires `cat` on PATH, including Windows. F4 uses `VISUAL`, then `EDITOR`, then `vi` on Unix or `notepad` on Windows. Editor arguments are parsed as quoted words and invoked directly; shell expressions are not evaluated. `cat` output stays visible until Enter returns to the file manager.
 
@@ -143,15 +151,15 @@ Local files, archives, and remote servers share a provider interface, typed loca
 Use **Go → FTP / SFTP / SSH connection**, enter a URL through **Alt+C**, or pass URLs as startup locations:
 
 ```sh
-mc 'sftp://alice@example.com/home/alice' /local/downloads
-mc 'ssh://alice@example.com:2222/home/alice' 'ftp://user@files.example.com/public'
+mc-rs 'sftp://alice@example.com/home/alice' /local/downloads
+mc-rs 'ssh://alice@example.com:2222/home/alice' 'ftp://user@files.example.com/public'
 ```
 
 - `sftp://` uses the server's SFTP subsystem. `ssh://` works without SFTP by running an embedded Python 3 helper on a Unix server through its SSH login shell. The helper receives paths and content through stdin; filenames never become shell commands. It is not installed on the server.
 - For `ssh://`, noninteractive shell startup must not read stdin or print to stdout. Keep banners and terminal utilities inside an interactive-shell guard (in Fish: `if status is-interactive` … `end`). SFTP avoids the login-shell helper.
 - SSH reads `~/.ssh/config`: `Host` patterns/negation, `Include` (filename wildcards), `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`, and `ProxyJump` (including comma-separated hops). Explicit URL user/port overrides configuration. The first matching scalar value wins; identity files accumulate. Key paths support `~/` and `%d/%h/%n/%r/%p/%%`. This is a non-executing subset: Match, ProxyCommand, HostKeyAlias, UserKnownHostsFile, and CertificateFile are unsupported and fail explicitly when applicable. System SSH config is not read.
 - Authentication tries the agent (unless IdentitiesOnly), configured/default keys, then masked keyboard-interactive/MFA and password/key-passphrase prompts. MFA responses are masked even if the server requests echo. Default keys are `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`.
-- Existing host keys must match `~/.ssh/known_hosts`; changed keys always fail. For an unknown host, mc displays its SHA256 fingerprint. Verify it independently and type `trust` to accept it for that connection only. It does not modify known_hosts; use your SSH client to record permanent trust. `StrictHostKeyChecking yes` disables session trust and requires a matching known_hosts entry. Each jump host is authenticated and verified separately, with at most eight hops.
+- Existing host keys must match `~/.ssh/known_hosts`; changed keys always fail. For an unknown host, mc-rs displays its SHA256 fingerprint. Verify it independently and type `trust` to accept it for that connection only. It does not modify known_hosts; use your SSH client to record permanent trust. `StrictHostKeyChecking yes` disables session trust and requires a matching known_hosts entry. Each jump host is authenticated and verified separately, with at most eight hops.
 - `ftp://` is plain, unencrypted FTP using passive transfers. It defaults to anonymous login when the user is omitted. Named users get a masked password prompt. FTPS is not implemented. Passwords are rejected in URLs and are never saved in configuration.
 - Paths are absolute on the server. Spaces and URL delimiters can be percent-encoded. UTF-8 names are supported; control characters and backslashes are rejected. Within a remote panel, relative and absolute paths stay on that server. **Go → Local directory** returns to the process's local working directory; `file:///absolute/path` also opens a local location.
 - Browse, select/size directories, search filenames, F3 view files, and copy/move/mkdir/permanently delete using the normal keys and background jobs. Remote files have no trash: F8 retains the trash default and explains that permanent deletion must be chosen explicitly. Remote editing and creating remote symlinks are not implemented.

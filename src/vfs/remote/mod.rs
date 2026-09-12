@@ -37,7 +37,7 @@ impl Endpoint {
         };
         ensure!(
             uri.password().is_none(),
-            "Do not put passwords in URLs; mc prompts privately"
+            "Do not put passwords in URLs; mc-rs prompts privately"
         );
         ensure!(
             uri.query().is_none() && uri.fragment().is_none(),
