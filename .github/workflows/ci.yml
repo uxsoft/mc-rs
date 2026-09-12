@@ -100,7 +100,7 @@ jobs:
       - name: Linux terminal smoke test
         if: runner.os == 'Linux'
         env:
-          MC_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/mc
+          MC_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/mc-rs
         run: |
           python3 -B -m unittest discover -s tests -p test_terminal_harness.py
           python3 tests/terminal_smoke.py
@@ -112,7 +112,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
-          MC_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/mc
+          MC_TEST_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/mc-rs
         run: |
           sudo apt-get install -y openssh-server
           python -m pip install -r tests/requirements-remote.txt
@@ -128,10 +128,10 @@ jobs:
         run: |
           set -euo pipefail
           staging="$(mktemp -d)"
-          cp "target/$TARGET/release/mc" LICENSE README.md "$staging/"
+          cp "target/$TARGET/release/mc-rs" LICENSE README.md "$staging/"
           mkdir -p dist
           name="mc-rs-$TARGET-v$VERSION.tgz"
-          tar -czf "dist/$name" -C "$staging" mc LICENSE README.md
+          tar -czf "dist/$name" -C "$staging" mc-rs LICENSE README.md
           (cd dist && shasum -a 256 "$name" > "$name.sha256")
       - name: Package installable archive
         if: runner.os == 'Windows'
@@ -142,7 +142,7 @@ jobs:
         run: |
           $staging = Join-Path $env:RUNNER_TEMP "staging"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item "target/$env:TARGET/release/mc.exe", LICENSE, README.md $staging
+          Copy-Item "target/$env:TARGET/release/mc-rs.exe", LICENSE, README.md $staging
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $name = "mc-rs-$env:TARGET-v$env:VERSION.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath "dist/$name" -CompressionLevel Optimal
@@ -157,10 +157,10 @@ jobs:
           retention-days: 14
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: mc-${{ steps.version.outputs.version }}-${{ matrix.target }}
+          name: mc-rs-${{ steps.version.outputs.version }}-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/mc
-            target/${{ matrix.target }}/release/mc.exe
+            target/${{ matrix.target }}/release/mc-rs
+            target/${{ matrix.target }}/release/mc-rs.exe
             LICENSE
             README.md
             PLAN.md

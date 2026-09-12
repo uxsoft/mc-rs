@@ -893,7 +893,10 @@ fn filesystem_parents_preserve_symlinks_and_lock_aliases() {
     fs::write(dir.path().join("actual/file"), "correct").unwrap();
     let alias: VfsPath = dir.path().join("view/link/../file").into();
     assert_eq!(read_virtual(alias.clone()), b"correct");
-    assert_eq!(alias.parent().unwrap().parent().unwrap().path, dir.path());
+    assert_eq!(
+        alias.parent().unwrap().parent().unwrap().path,
+        fs::canonicalize(dir.path()).unwrap()
+    );
     let direct: VfsPath = dir.path().join("actual/file").into();
     assert!(mc::jobs::overlaps(
         &mc::jobs::resources(Operation::Delete, &[alias], &direct),
