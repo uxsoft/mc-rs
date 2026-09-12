@@ -953,7 +953,6 @@ fn windows_filesystem_forms_retain_parent_components() {
         r"C:\folder\link\..\leaf",
         r"..\..\leaf",
         r"\\server\share\link\..\leaf",
-        r"\\?\C:\link\..\leaf",
     ] {
         let path = std::path::PathBuf::from(value);
         let virtual_path: VfsPath = path.clone().into();
@@ -965,4 +964,6 @@ fn windows_filesystem_forms_retain_parent_components() {
                 .any(|c| c == std::path::Component::ParentDir)
         );
     }
+    let verbatim: VfsPath = std::path::PathBuf::from(r"\\?\C:\link\..\leaf").into();
+    assert_eq!(verbatim.path, std::path::PathBuf::from(r"\\?\C:\leaf"));
 }
