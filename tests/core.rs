@@ -891,11 +891,12 @@ fn filesystem_parents_preserve_symlinks_and_lock_aliases() {
     std::os::unix::fs::symlink(dir.path().join("actual/sub"), dir.path().join("view/link"))
         .unwrap();
     fs::write(dir.path().join("actual/file"), "correct").unwrap();
+    let canonical_dir = fs::canonicalize(dir.path()).unwrap();
     let alias: VfsPath = dir.path().join("view/link/../file").into();
     assert_eq!(read_virtual(alias.clone()), b"correct");
     assert_eq!(
         alias.parent().unwrap().parent().unwrap().path,
-        fs::canonicalize(dir.path()).unwrap()
+        canonical_dir
     );
     let direct: VfsPath = dir.path().join("actual/file").into();
     assert!(mc::jobs::overlaps(
@@ -905,7 +906,7 @@ fn filesystem_parents_preserve_symlinks_and_lock_aliases() {
     let missing = dir.path().join("view/link/../new/leaf");
     assert_eq!(
         Local.canonical(&missing).unwrap(),
-        dir.path().join("actual/new/leaf")
+        canonical_dir.join("actual/new/leaf")
     );
     let relative: VfsPath = std::path::PathBuf::from("../../missing").into();
     assert_eq!(relative.path, std::path::PathBuf::from("../../missing"));
