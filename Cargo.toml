@@ -58,7 +58,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
 rars = "0.9"
-zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+zip = { version = "9", default-features = false, features = ["deflate", "aes-crypto"] }
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 pulldown-cmark = "0.13"
 memmap2 = "0.9"
